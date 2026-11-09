@@ -1,12 +1,13 @@
-# Private Teen Patti Arena - Non-Host Clickable Actions Fix
+# Private Teen Patti Arena - Final Comprehensive Build
 
 ## Fixed Issues:
-1. **Peer ID Action Dispatching**: Previously, action buttons checked `p.id === 'user'`, but connected clients had unique PeerJS IDs (`myId`), causing action buttons under non-host seats to render incorrectly or fail dispatching. Fixed to correctly check `p.id === myId`.
-2. **Action State Propagation**: Added comprehensive state broadcast handshakes on all action handlers (`SEE_CARDS`, `PACK`, `CHAAL`, `SHOW`, `REQUEST_SIDESHOW`) so guest players can successfully trigger game actions and have them execute seamlessly through the host authority.
+1. **Identical Wi-Fi & Cross-Device Connectivity**: Fully resolved PeerJS signaling handshakes using isolated namespaces (`TEENPATTI-ROOM-...`), WebSocket keep-alive heartbeats, and multi-region STUN/TURN fallback relays so Android mobile and PC devices connect instantly on the same network or mobile data.
+2. **Action Clickability & State Sync**: Fixed non-host guest action buttons by replacing hardcoded string checks (`'user'`) with accurate network peer ID matching (`myId`). All actions (**See Card**, **Pack**, **Chaal**, **Side Show**, and **Show**) broadcast state instantly to the host and update all players' screens.
+3. **Room Interface Visibility**: Ensured game state sync packets transmit immediately upon connection open so joining players enter the waiting room and table seamlessly without hanging.
 
-## How to Deploy:
+## How to Build & Deploy to Netlify:
 ```bash
 npm install
 npm run build
 ```
-Upload the contents of the `dist` folder to Netlify.
+Upload contents of the generated `dist` folder to Netlify.

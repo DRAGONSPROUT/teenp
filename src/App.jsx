@@ -152,7 +152,9 @@ export default function App() {
         currentStake,
         roundTurnCount,
         winner,
-        sideShowRequest
+        sideShowRequest,
+        maxPlayers,
+        bootAmount
       };
 
       setTimeout(() => broadcastState(syncPayload), 50);
@@ -202,7 +204,6 @@ export default function App() {
       conn.on('error', () => handlePlayerDisconnect(conn.peer));
 
       conn.on('open', () => {
-        // Send full authoritative state immediately to newly connected client
         conn.send({ 
           type: 'STATE_UPDATE', 
           data: { 
@@ -352,6 +353,7 @@ export default function App() {
           if (s.sideShowRequest !== undefined) setSideShowRequest(s.sideShowRequest);
           if (s.maxPlayers) setMaxPlayers(s.maxPlayers);
           if (s.roundTurnCount !== undefined) setRoundTurnCount(s.roundTurnCount);
+          if (s.bootAmount !== undefined) setBootAmount(s.bootAmount);
         }
         if (data.type === 'ERROR') {
           alert(data.message);
@@ -488,9 +490,6 @@ export default function App() {
 
     let updated = [...players];
     let newPot = pot;
-    let nextTurn = currentTurnIdx;
-    let newWinner = winner;
-    let newSideShow = sideShowRequest;
 
     if (action === 'PACK') {
       updated = updated.map(p => p.id === playerId ? { ...p, isPacked: true } : p);
@@ -505,7 +504,7 @@ export default function App() {
     } else if (action === 'SEE_CARDS') {
       updated = updated.map(p => p.id === playerId ? { ...p, isBlind: false } : p);
       setPlayers(updated);
-      broadcastState({ players: updated, pot, currentStake, currentTurnIdx, gameState, roundTurnCount, winner, sideShowRequest });
+      broadcastState({ players: updated, pot, currentStake, currentTurnIdx, gameState, roundTurnCount, winner, sideShowRequest, maxPlayers, bootAmount });
     } else if (action === 'SHOW') {
       executeShowdown(updated, newPot);
     } else if (action === 'REQUEST_SIDESHOW') {
@@ -522,7 +521,7 @@ export default function App() {
       };
 
       setSideShowRequest(reqObj);
-      broadcastState({ players: updated, pot, currentStake, currentTurnIdx, gameState, roundTurnCount, winner, sideShowRequest: reqObj });
+      broadcastState({ players: updated, pot, currentStake, currentTurnIdx, gameState, roundTurnCount, winner, sideShowRequest: reqObj, maxPlayers, bootAmount });
 
       if (targetPlayer.isBot) {
         setTimeout(() => handleSideShowResponse(true, reqObj), 1500);
@@ -535,7 +534,7 @@ export default function App() {
   const handleSideShowResponse = (accepted, reqObj) => {
     if (!accepted) {
       setSideShowRequest(null);
-      broadcastState({ players, pot, currentStake, currentTurnIdx, gameState, roundTurnCount, winner, sideShowRequest: null });
+      broadcastState({ players, pot, currentStake, currentTurnIdx, gameState, roundTurnCount, winner, sideShowRequest: null, maxPlayers, bootAmount });
       return;
     }
 
@@ -580,7 +579,9 @@ export default function App() {
       gameState,
       roundTurnCount: roundTurnCount + 1,
       winner,
-      sideShowRequest: null
+      sideShowRequest: null,
+      maxPlayers,
+      bootAmount
     });
   };
 
@@ -634,7 +635,9 @@ export default function App() {
       winner: winObj,
       gameState: 'ENDED',
       pot: finalPot,
-      sideShowRequest: null
+      sideShowRequest: null,
+      maxPlayers,
+      bootAmount
     });
   };
 
