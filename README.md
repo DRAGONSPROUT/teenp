@@ -4,26 +4,9 @@ A full-featured, private multiplayer Teen Patti web application built with React
 
 ## Features
 - **Platforms & Tech Stack**: Responsive Web App with React, Vite, Tailwind CSS, PeerJS for real-time P2P multiplayer.
-- **Room Management**: Custom invite-only 6-digit room codes, customizable boot amounts ($50, $100, $500), seat options (3 to 6 players).
-- **Smart Bot Auto-Fill**: Bots automatically fill empty seats when dealing cards.
-- **Game Mechanics**: Complete standard Teen Patti hand evaluation engine, Blind/Seen betting rules, dynamic side-show feature, maximum turn limit showdown, active neon indicators, dynamic action controls, and simulated voice chat toggle.
+- **Real-Time WebRTC P2P**: Syncs room creation, joining, turn states, bets, folds, and side shows across clients via PeerJS.
+- **Netlify Ready**: Includes fully configured `netlify.toml` for `pnpm` builds and client-side routing.
 
-## Getting Started
-
-### Prerequisites
-- Node.js (v18 or higher recommended)
-- npm or yarn
-
-### Installation
-1. Install dependencies:
-   ```bash
-   npm install
-   ```
-2. Start local development server:
-   ```bash
-   npm run dev
-   ```
-3. Build for production:
-   ```bash
-   npm run build
-   ```
+## Deployment on Netlify
+1. Commit all project files (including `pnpm-lock.yaml` or run `pnpm install` before committing).
+2. Connect repository to Netlify. Netlify will build automatically using `netlify.toml`.
