@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import Peer from 'peerjs';
 import { 
   Users, Shield, Zap, Play, Volume2, VolumeX, Mic, MicOff, 
-  Eye, RefreshCw, Trophy, Crown, ArrowRight, Copy, Check, LogOut
+  Eye, RefreshCw, Trophy, Crown, ArrowRight, Copy, Check, LogOut, AlertCircle
 } from 'lucide-react';
 
 const HAND_RANKS = {
@@ -28,6 +28,24 @@ const SUITS = [
 
 const BOT_NAMES = ['Aarav', 'Vihaan', 'Ananya', 'Diya', 'Kabir', 'Rohan'];
 
+// ICE Servers configuration with multi-region STUN/TURN servers to allow cross-network connections (Wi-Fi vs Mobile Data)
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+  { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:global.stun.twilio.com:3478' },
+  {
+    urls: 'turn:openrelay.metered.ca:80',
+    username: 'openrelayproject',
+    credential: 'openrelayproject'
+  },
+  {
+    urls: 'turn:openrelay.metered.ca:443',
+    username: 'openrelayproject',
+    credential: 'openrelayproject'
+  }
+];
+
 export default function App() {
   const [inLobby, setInLobby] = useState(true);
   const [roomCode, setRoomCode] = useState('');
@@ -36,6 +54,8 @@ export default function App() {
   const [playerName, setPlayerName] = useState('Player 1');
   const [isHost, setIsHost] = useState(false);
   const [myPlayerId, setMyPlayerId] = useState('');
+  const [connStatus, setConnStatus] = useState('');
+  const [errorMessage, setErrorMessage] = useState('');
 
   const [players, setPlayers] = useState([]);
   const [currentTurn, setCurrentTurn] = useState(0);
@@ -43,15 +63,30 @@ export default function App() {
   const [currentStake, setCurrentStake] = useState(50);
   const [gameStatus, setGameStatus] = useState('waiting');
   const [turnCount, setTurnCount] = useState(0);
-  const [sideShowRequest, setSideShowRequest] = useState(null);
   const [winnerModal, setWinnerModal] = useState(null);
   const [copied, setCopied] = useState(false);
-  
-  const [micMuted, setMicMuted] = useState(true);
-  const [audioMuted, setAudioMuted] = useState(false);
 
   const peerRef = useRef(null);
-  const connectionsRef = useRef([]);
+  const connectionsRef = useRef({});
+  const playersRef = useRef(players);
+  const isHostRef = useRef(isHost);
+
+  useEffect(() => {
+    playersRef.current = players;
+  }, [players]);
+
+  useEffect(() => {
+    isHostRef.current = isHost;
+  }, [isHost]);
+
+  // Clean up PeerJS on component unmount
+  useEffect(() => {
+    return () => {
+      if (peerRef.current) {
+        peerRef.current.destroy();
+      }
+    };
+  }, []);
 
   const generateCard = () => {
     const values = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
@@ -87,84 +122,201 @@ export default function App() {
   };
 
   const broadcastState = (newState) => {
-    connectionsRef.current.forEach(conn => {
-      if (conn.open) {
+    Object.values(connectionsRef.current).forEach(conn => {
+      if (conn && conn.open) {
         conn.send({ type: 'SYNC_STATE', payload: newState });
       }
     });
   };
 
+  const sanitizeCode = (code) => code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+
   const createRoom = () => {
-    const code = Math.random().toString(36).substring(2, 8).toUpperCase();
-    setRoomCode(code);
+    setErrorMessage('');
+    const rawCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+    const formattedCode = sanitizeCode(rawCode);
+    const hostId = 'patti_host_' + formattedCode;
+
+    setRoomCode(formattedCode);
     setIsHost(true);
-    setMyPlayerId('host_' + code);
+    setMyPlayerId(hostId);
+    setConnStatus('Initializing peer room...');
 
-    const initialPlayers = [
-      { id: 'host_' + code, name: playerName || 'Host Player', isHost: true, isBot: false, chips: 5000, cards: [], isBlind: true, folded: false }
-    ];
-    setPlayers(initialPlayers);
+    if (peerRef.current) {
+      peerRef.current.destroy();
+    }
 
-    const peer = new Peer('TP_' + code, {
-      config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:global.stun.twilio.com:3478' }] }
+    const peer = new Peer(hostId, {
+      config: { iceServers: ICE_SERVERS },
+      debug: 1
     });
 
-    peer.on('open', () => {
+    peer.on('open', (id) => {
+      console.log('Host room ready:', id);
+      const initialHostPlayer = {
+        id: hostId,
+        name: playerName.trim() || 'Host',
+        isHost: true,
+        isBot: false,
+        chips: 5000,
+        cards: [],
+        isBlind: true,
+        folded: false
+      };
+      setPlayers([initialHostPlayer]);
       setInLobby(false);
       setGameStatus('lobby');
+      setConnStatus('Room ready. Waiting for friends...');
     });
 
     peer.on('connection', (conn) => {
-      connectionsRef.current.push(conn);
-      
+      console.log('Incoming client connection:', conn.peer);
+
+      conn.on('open', () => {
+        connectionsRef.current[conn.peer] = conn;
+      });
+
       conn.on('data', (data) => {
-        handleIncomingMessage(data, conn);
+        handleIncomingData(data, conn);
       });
 
       conn.on('close', () => {
-        connectionsRef.current = connectionsRef.current.filter(c => c !== conn);
+        console.log('Player disconnected:', conn.peer);
+        delete connectionsRef.current[conn.peer];
+        setPlayers(prev => {
+          const updated = prev.filter(p => p.id !== conn.peer);
+          if (isHostRef.current) {
+            broadcastState({
+              players: updated,
+              pot,
+              currentTurn,
+              gameStatus,
+              currentStake,
+              turnCount
+            });
+          }
+          return updated;
+        });
       });
+
+      conn.on('error', (err) => {
+        console.error('Connection error:', err);
+      });
+    });
+
+    peer.on('error', (err) => {
+      console.error('Host peer error:', err);
+      if (err.type === 'unavailable-id') {
+        setErrorMessage('Room code collision. Please click Create again.');
+      } else {
+        setErrorMessage('Peer connection error: ' + err.message);
+      }
+      setConnStatus('');
     });
 
     peerRef.current = peer;
   };
 
   const joinRoom = () => {
-    if (!roomCode) return;
-    const cleanCode = roomCode.toUpperCase();
-    const guestId = 'guest_' + Math.random().toString(36).substring(2, 7);
+    setErrorMessage('');
+    if (!roomCode) {
+      setErrorMessage('Please enter a valid 6-digit room code.');
+      return;
+    }
+
+    const cleanCode = sanitizeCode(roomCode);
+    if (cleanCode.length !== 6) {
+      setErrorMessage('Room code must be 6 alphanumeric characters.');
+      return;
+    }
+
+    const guestId = 'patti_guest_' + Math.random().toString(36).substring(2, 8);
+    const hostPeerId = 'patti_host_' + cleanCode;
+
     setMyPlayerId(guestId);
     setIsHost(false);
+    setConnStatus('Connecting to room ' + cleanCode + '...');
 
-    const peer = new Peer({
-      config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:global.stun.twilio.com:3478' }] }
+    if (peerRef.current) {
+      peerRef.current.destroy();
+    }
+
+    const peer = new Peer(guestId, {
+      config: { iceServers: ICE_SERVERS },
+      debug: 1
     });
 
-    peer.on('open', () => {
-      const conn = peer.connect('TP_' + cleanCode);
-      
+    peer.on('open', (id) => {
+      console.log('Guest peer opened:', id);
+      const conn = peer.connect(hostPeerId, { reliable: true });
+
       conn.on('open', () => {
-        connectionsRef.current = [conn];
+        console.log('Connected to host:', hostPeerId);
+        connectionsRef.current[hostPeerId] = conn;
+        setConnStatus('Handshake established! Synchronizing...');
+
         conn.send({
           type: 'JOIN_REQUEST',
-          payload: { id: guestId, name: playerName || 'Guest Player' }
+          payload: {
+            id: guestId,
+            name: playerName.trim() || 'Player ' + Math.floor(Math.random() * 100)
+          }
         });
-        setInLobby(false);
       });
 
       conn.on('data', (data) => {
-        handleIncomingMessage(data, conn);
+        handleIncomingData(data, conn);
       });
+
+      conn.on('close', () => {
+        setErrorMessage('Disconnected from host.');
+        setInLobby(true);
+        setGameStatus('waiting');
+      });
+
+      conn.on('error', (err) => {
+        console.error('Guest connection error:', err);
+        setErrorMessage('Failed to connect to host. Check room code.');
+      });
+    });
+
+    peer.on('error', (err) => {
+      console.error('Guest peer error:', err);
+      setErrorMessage('Unable to connect to room. Please check the code or network connection.');
+      setConnStatus('');
     });
 
     peerRef.current = peer;
   };
 
-  const handleIncomingMessage = (data, conn) => {
-    if (data.type === 'JOIN_REQUEST' && isHost) {
+  const handleIncomingData = (data, conn) => {
+    if (!data || !data.type) return;
+
+    if (data.type === 'JOIN_REQUEST' && isHostRef.current) {
+      const newPlayer = {
+        id: data.payload.id,
+        name: data.payload.name,
+        isHost: false,
+        isBot: false,
+        chips: 5000,
+        cards: [],
+        isBlind: true,
+        folded: false
+      };
+
       setPlayers(prev => {
-        const updated = [...prev, { id: data.payload.id, name: data.payload.name, isHost: false, isBot: false, chips: 5000, cards: [], isBlind: true, folded: false }];
-        const statePayload = { players: updated, pot, currentTurn, gameStatus, currentStake, turnCount };
+        const exists = prev.some(p => p.id === newPlayer.id);
+        const updated = exists ? prev : [...prev, newPlayer];
+
+        const statePayload = {
+          players: updated,
+          pot,
+          currentTurn,
+          gameStatus,
+          currentStake,
+          turnCount
+        };
+
         conn.send({ type: 'SYNC_STATE', payload: statePayload });
         broadcastState(statePayload);
         return updated;
@@ -176,6 +328,8 @@ export default function App() {
       setGameStatus(data.payload.gameStatus);
       setCurrentStake(data.payload.currentStake);
       setTurnCount(data.payload.turnCount);
+      setInLobby(false);
+      setConnStatus('Connected');
     } else if (data.type === 'ACTION_CHAAL') {
       handleChaal(data.payload.playerId, data.payload.amount);
     } else if (data.type === 'ACTION_PACK') {
@@ -228,8 +382,6 @@ export default function App() {
       });
     }
   };
-
-  const activePlayers = players.filter(p => !p.folded);
 
   const getNextTurnIndex = (fromIndex) => {
     let next = (fromIndex + 1) % players.length;
@@ -324,7 +476,7 @@ export default function App() {
             <h1 className="font-extrabold text-lg tracking-tight bg-gradient-to-r from-emerald-400 to-teal-300 bg-clip-text text-transparent">
               PRIVATE TEEN PATTI
             </h1>
-            <p className="text-xs text-slate-400 font-medium">Real-time P2P WebRTC Casino</p>
+            <p className="text-xs text-slate-400 font-medium">Real-time WebRTC Private Multiplayer</p>
           </div>
         </div>
 
@@ -338,7 +490,10 @@ export default function App() {
               </button>
             </div>
             <button 
-              onClick={() => setInLobby(true)} 
+              onClick={() => {
+                setInLobby(true);
+                if (peerRef.current) peerRef.current.destroy();
+              }} 
               className="p-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-400 hover:bg-rose-500/20 transition"
               title="Leave Room"
             >
@@ -352,7 +507,20 @@ export default function App() {
         {inLobby ? (
           <div className="w-full max-w-md bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-2xl backdrop-blur">
             <h2 className="text-xl font-bold text-slate-100 mb-1">Join or Create Private Table</h2>
-            <p className="text-xs text-slate-400 mb-6">Play real-time WebRTC 3-card Poker with friends or smart bots</p>
+            <p className="text-xs text-slate-400 mb-4">Play real-time WebRTC 3-card Poker with friends across networks</p>
+
+            {errorMessage && (
+              <div className="mb-4 p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-rose-300 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                <span>{errorMessage}</span>
+              </div>
+            )}
+
+            {connStatus && !errorMessage && (
+              <div className="mb-4 p-2.5 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-300 text-xs text-center font-medium animate-pulse">
+                {connStatus}
+              </div>
+            )}
 
             <div className="space-y-4">
               <div>
@@ -452,13 +620,15 @@ export default function App() {
                       Share room code <span className="font-mono font-bold text-emerald-400">{roomCode}</span> with friends. Real-time players connected: {players.length}
                     </p>
                   </div>
-                  {isHost && (
+                  {isHost ? (
                     <button 
                       onClick={startGame}
                       className="px-6 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-xl transition shadow-lg shadow-emerald-500/20"
                     >
                       Start Game Now
                     </button>
+                  ) : (
+                    <div className="text-xs text-amber-400 font-medium">Waiting for the host to start the game...</div>
                   )}
                 </div>
               )}
@@ -498,7 +668,7 @@ export default function App() {
                         </div>
                       </div>
 
-                      {gameStatus === 'playing' && player.cards.length > 0 && (
+                      {gameStatus === 'playing' && player.cards && player.cards.length > 0 && (
                         <div className="flex gap-1 mt-2">
                           {player.cards.map((card, cIdx) => (
                             <div 
