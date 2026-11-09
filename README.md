@@ -1,13 +1,29 @@
-# Private Teen Patti Arena - Final Comprehensive Build
+# Private Teen Patti Web Application
 
-## Fixed Issues:
-1. **Identical Wi-Fi & Cross-Device Connectivity**: Fully resolved PeerJS signaling handshakes using isolated namespaces (`TEENPATTI-ROOM-...`), WebSocket keep-alive heartbeats, and multi-region STUN/TURN fallback relays so Android mobile and PC devices connect instantly on the same network or mobile data.
-2. **Action Clickability & State Sync**: Fixed non-host guest action buttons by replacing hardcoded string checks (`'user'`) with accurate network peer ID matching (`myId`). All actions (**See Card**, **Pack**, **Chaal**, **Side Show**, and **Show**) broadcast state instantly to the host and update all players' screens.
-3. **Room Interface Visibility**: Ensured game state sync packets transmit immediately upon connection open so joining players enter the waiting room and table seamlessly without hanging.
+A full-featured, private multiplayer Teen Patti web application built with React, PeerJS (WebRTC), and Tailwind CSS.
 
-## How to Build & Deploy to Netlify:
-```bash
-npm install
-npm run build
-```
-Upload contents of the generated `dist` folder to Netlify.
+## Features
+- **Platforms & Tech Stack**: Responsive Web App with React, Vite, Tailwind CSS, PeerJS for real-time P2P multiplayer.
+- **Room Management**: Custom invite-only 6-digit room codes, customizable boot amounts ($50, $100, $500), seat options (3 to 6 players).
+- **Smart Bot Auto-Fill**: Bots automatically fill empty seats when dealing cards.
+- **Game Mechanics**: Complete standard Teen Patti hand evaluation engine, Blind/Seen betting rules, dynamic side-show feature, maximum turn limit showdown, active neon indicators, dynamic action controls, and simulated voice chat toggle.
+
+## Getting Started
+
+### Prerequisites
+- Node.js (v18 or higher recommended)
+- npm or yarn
+
+### Installation
+1. Install dependencies:
+   ```bash
+   npm install
+   ```
+2. Start local development server:
+   ```bash
+   npm run dev
+   ```
+3. Build for production:
+   ```bash
+   npm run build
+   ```
