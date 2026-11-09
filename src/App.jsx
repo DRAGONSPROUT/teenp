@@ -42,7 +42,7 @@ const evaluateHand = (cards) => {
 };
 
 const PEER_CONFIG = {
-  debug: 1,
+  debug: 2,
   config: {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
@@ -52,7 +52,17 @@ const PEER_CONFIG = {
       { urls: 'stun:stun4.l.google.com:19302' },
       { urls: 'stun:global.stun.twilio.com:3478' },
       { urls: 'stun:relay.metered.ca:80' },
-      { urls: 'stun:stun.services.mozilla.com' }
+      { urls: 'stun:stun.services.mozilla.com' },
+      {
+        urls: 'turn:openrelay.metered.ca:80',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:443',
+        username: 'openrelayproject',
+        credential: 'openrelayproject'
+      }
     ],
     iceCandidatePoolSize: 10
   }
@@ -137,7 +147,12 @@ export default function App() {
       const syncPayload = {
         players: updatedPlayers,
         currentTurnIdx: nextTurn,
-        gameState: updatedPlayers.length === 0 ? 'LOBBY' : gameState
+        gameState: updatedPlayers.length === 0 ? 'LOBBY' : gameState,
+        pot,
+        currentStake,
+        roundTurnCount,
+        winner,
+        sideShowRequest
       };
 
       setTimeout(() => broadcastState(syncPayload), 50);
@@ -187,13 +202,20 @@ export default function App() {
       conn.on('error', () => handlePlayerDisconnect(conn.peer));
 
       conn.on('open', () => {
+        // Send full authoritative state immediately to newly connected client
         conn.send({ 
           type: 'STATE_UPDATE', 
           data: { 
             players, 
             gameState, 
             maxPlayers, 
-            bootAmount 
+            bootAmount,
+            currentTurnIdx,
+            pot,
+            currentStake,
+            roundTurnCount,
+            winner,
+            sideShowRequest
           } 
         });
       });
@@ -206,6 +228,7 @@ export default function App() {
               return prev;
             }
 
+            const existingIdx = prev.findIndex(p => p.id === conn.peer);
             const newP = {
               id: conn.peer,
               name: data.name,
@@ -217,12 +240,25 @@ export default function App() {
               isBot: false
             };
 
-            const updatedList = [...prev.filter(p => p.id !== conn.peer), newP];
+            let updatedList;
+            if (existingIdx !== -1) {
+              updatedList = [...prev];
+              updatedList[existingIdx] = newP;
+            } else {
+              updatedList = [...prev, newP];
+            }
+
             const syncData = { 
               players: updatedList, 
-              gameState: gameState === 'PLAYING' ? 'PLAYING' : 'WAITING', 
+              gameState, 
               maxPlayers, 
-              bootAmount 
+              bootAmount,
+              currentTurnIdx,
+              pot,
+              currentStake,
+              roundTurnCount,
+              winner,
+              sideShowRequest
             };
 
             conn.send({ type: 'STATE_UPDATE', data: syncData });
@@ -315,6 +351,7 @@ export default function App() {
           if (s.winner !== undefined) setWinner(s.winner);
           if (s.sideShowRequest !== undefined) setSideShowRequest(s.sideShowRequest);
           if (s.maxPlayers) setMaxPlayers(s.maxPlayers);
+          if (s.roundTurnCount !== undefined) setRoundTurnCount(s.roundTurnCount);
         }
         if (data.type === 'ERROR') {
           alert(data.message);
@@ -421,7 +458,9 @@ export default function App() {
       gameState: 'PLAYING',
       winner: null,
       roundTurnCount: 0,
-      sideShowRequest: null
+      sideShowRequest: null,
+      maxPlayers,
+      bootAmount
     };
 
     setPot(bootCollected);
@@ -447,37 +486,43 @@ export default function App() {
   const handleActionFromClient = (action, playerId, payload) => {
     if (!isHost) return;
 
+    let updated = [...players];
+    let newPot = pot;
+    let nextTurn = currentTurnIdx;
+    let newWinner = winner;
+    let newSideShow = sideShowRequest;
+
     if (action === 'PACK') {
-      const updated = players.map(p => p.id === playerId ? { ...p, isPacked: true } : p);
+      updated = updated.map(p => p.id === playerId ? { ...p, isPacked: true } : p);
       setPlayers(updated);
-      advanceTurn(updated);
+      advanceTurn(updated, newPot);
     } else if (action === 'CHAAL') {
-      const updated = players.map(p => p.id === playerId ? { ...p, chips: p.chips - payload.amount } : p);
-      const newPot = pot + payload.amount;
+      updated = updated.map(p => p.id === playerId ? { ...p, chips: p.chips - payload.amount } : p);
+      newPot = pot + payload.amount;
       setPot(newPot);
       setPlayers(updated);
       advanceTurn(updated, newPot);
     } else if (action === 'SEE_CARDS') {
-      const updated = players.map(p => p.id === playerId ? { ...p, isBlind: false } : p);
+      updated = updated.map(p => p.id === playerId ? { ...p, isBlind: false } : p);
       setPlayers(updated);
-      broadcastState({ players: updated });
+      broadcastState({ players: updated, pot, currentStake, currentTurnIdx, gameState, roundTurnCount, winner, sideShowRequest });
     } else if (action === 'SHOW') {
-      executeShowdown();
+      executeShowdown(updated, newPot);
     } else if (action === 'REQUEST_SIDESHOW') {
-      const activeIndices = players.map((p, i) => !p.isPacked ? i : -1).filter(i => i !== -1);
+      const activeIndices = updated.map((p, i) => !p.isPacked ? i : -1).filter(i => i !== -1);
       const currentPosInActive = activeIndices.indexOf(currentTurnIdx);
       const prevActiveIdx = activeIndices[(currentPosInActive - 1 + activeIndices.length) % activeIndices.length];
-      const targetPlayer = players[prevActiveIdx];
+      const targetPlayer = updated[prevActiveIdx];
 
       const reqObj = {
         requesterId: playerId,
         targetId: targetPlayer.id,
-        requesterName: players.find(p => p.id === playerId)?.name,
+        requesterName: updated.find(p => p.id === playerId)?.name,
         targetName: targetPlayer.name
       };
 
       setSideShowRequest(reqObj);
-      broadcastState({ sideShowRequest: reqObj });
+      broadcastState({ players: updated, pot, currentStake, currentTurnIdx, gameState, roundTurnCount, winner, sideShowRequest: reqObj });
 
       if (targetPlayer.isBot) {
         setTimeout(() => handleSideShowResponse(true, reqObj), 1500);
@@ -490,7 +535,7 @@ export default function App() {
   const handleSideShowResponse = (accepted, reqObj) => {
     if (!accepted) {
       setSideShowRequest(null);
-      broadcastState({ sideShowRequest: null });
+      broadcastState({ players, pot, currentStake, currentTurnIdx, gameState, roundTurnCount, winner, sideShowRequest: null });
       return;
     }
 
@@ -505,7 +550,7 @@ export default function App() {
 
     setPlayers(updated);
     setSideShowRequest(null);
-    advanceTurn(updated);
+    advanceTurn(updated, pot);
   };
 
   const advanceTurn = (currentPlayersList, updatedPot = pot) => {
@@ -532,6 +577,9 @@ export default function App() {
       players: currentPlayersList,
       currentTurnIdx: nextIdx,
       pot: updatedPot,
+      gameState,
+      roundTurnCount: roundTurnCount + 1,
+      winner,
       sideShowRequest: null
     });
   };
@@ -556,7 +604,7 @@ export default function App() {
 
       return () => clearTimeout(timer);
     }
-  }, [currentTurnIdx, gameState, isHost]);
+  }, [currentTurnIdx, gameState, isHost, players]);
 
   const executeShowdown = (currentPlayersList = players, targetPot = pot) => {
     const active = currentPlayersList.filter(p => !p.isPacked);
@@ -576,14 +624,16 @@ export default function App() {
 
   const declareWinner = (winPlayer, reason, finalPot) => {
     const updated = players.map(p => p.id === winPlayer.id ? { ...p, chips: p.chips + finalPot } : p);
-    setWinner({ ...winPlayer, reason });
+    const winObj = { ...winPlayer, reason };
+    setWinner(winObj);
     setPlayers(updated);
     setGameState('ENDED');
 
     broadcastState({
       players: updated,
-      winner: { ...winPlayer, reason },
+      winner: winObj,
       gameState: 'ENDED',
+      pot: finalPot,
       sideShowRequest: null
     });
   };
@@ -877,10 +927,9 @@ export default function App() {
                     <span className="text-xs font-mono text-amber-400 font-semibold">${p.chips}</span>
                   </div>
 
-                  {/* IN-GAME OPTIONS BELOW PLAYER SEAT ONLY (Visible directly under client's own seat card/badge) */}
+                  {/* FIXED: Action buttons shown for the player seat immediately matching myId */}
                   {isMe && gameState === 'PLAYING' && (
                     <div className="mt-3 flex flex-wrap items-center justify-center gap-1.5 z-20 bg-slate-950/95 backdrop-blur-md p-2 rounded-2xl border border-amber-500/30 shadow-2xl animate-in zoom-in-95">
-                      {/* See Card Toggle Option */}
                       {p.isBlind ? (
                         <button 
                           onClick={() => sendPlayerAction('SEE_CARDS')}
@@ -894,7 +943,6 @@ export default function App() {
                         </div>
                       )}
 
-                      {/* Turn-Dependent Game Controls */}
                       {isCurrentTurn ? (
                         <>
                           <button 

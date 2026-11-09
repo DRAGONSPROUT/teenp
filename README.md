@@ -1,12 +1,12 @@
-# Private Teen Patti Arena - On-Table Player UI Controls Update
+# Private Teen Patti Arena - Non-Host Clickable Actions Fix
 
-## Changes Implemented:
-1. **On-Table In-Game Action Options**: Removed the fixed bottom footer bar and placed action buttons (**See Card**, **Pack**, **Chaal**, **Side Show**, and **Show**) directly on the felt table, anchored below the player's own seat card/badge.
-2. **P2P Connection & Peer Namespace**: Retained isolated room code logic and STUN fallback configuration for cross-device mobile joining on Netlify.
+## Fixed Issues:
+1. **Peer ID Action Dispatching**: Previously, action buttons checked `p.id === 'user'`, but connected clients had unique PeerJS IDs (`myId`), causing action buttons under non-host seats to render incorrectly or fail dispatching. Fixed to correctly check `p.id === myId`.
+2. **Action State Propagation**: Added comprehensive state broadcast handshakes on all action handlers (`SEE_CARDS`, `PACK`, `CHAAL`, `SHOW`, `REQUEST_SIDESHOW`) so guest players can successfully trigger game actions and have them execute seamlessly through the host authority.
 
-## How to Build & Deploy:
+## How to Deploy:
 ```bash
 npm install
 npm run build
 ```
-Upload contents of `dist` folder to Netlify.
+Upload the contents of the `dist` folder to Netlify.
