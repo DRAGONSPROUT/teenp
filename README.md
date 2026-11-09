@@ -1,12 +1,9 @@
-# Private Teen Patti Arena - P2P Connection Fix
+# Private Teen Patti Arena - Auto Disconnect & Connection Timeout Fix
 
-## Why "Connecting to host" gets stuck:
-WebRTC peer-to-peer data channels require both devices to agree on ICE candidates. When connecting across different Wi-Fi routers, 5G/4G cellular networks, or behind NAT firewalls, standard STUN servers often fail without a full ICE configuration and an immediate handshake state reply.
-
-## Applied Fixes:
-1. **Multi-Region STUN Server Fallbacks**: Added Google and Twilio public STUN relay nodes (`stun:global.stun.twilio.com:3478`).
-2. **Instant Handshake Sync**: When a client connects, the host immediately pushes a `STATE_UPDATE` handshake packet upon connection open, transitioning the client into the room lobby instantly.
-3. **Connection Timeout Handling**: Added a 10-second connection timeout fallback to reset status if a network firewall blocks the PeerJS signal.
+## Fixed Issues:
+1. **Auto Player Leave Detection**: When a player closes their browser, disconnects, or clicks "Leave Room", the host detects the connection drop instantly, removes them from the table, auto-advances the turn, and broadcasts an updated state to all clients.
+2. **Eliminated Connection Timeout**: Upgraded WebRTC configuration with Metered TURN relay fallbacks and an increased ICE candidate pool (`iceCandidatePoolSize: 10`) so mobile/cellular network users bypass strict NAT firewalls without hanging on connection.
+3. **Explicit Leave Room Option**: Added a top-bar "Leave" button so users can exit cleanly at any point.
 
 ## How to Test & Deploy:
 ```bash

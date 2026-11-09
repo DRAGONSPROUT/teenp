@@ -3,7 +3,7 @@ import { Peer } from 'peerjs';
 import { 
   Users, Volume2, VolumeX, Shield, Play, RotateCcw, 
   Copy, Check, Award, Eye, EyeOff, Coins, RefreshCw, Mic, MicOff,
-  UserCheck, ArrowRight, Zap, CheckCircle2, XCircle
+  UserCheck, ArrowRight, Zap, CheckCircle2, XCircle, LogOut
 } from 'lucide-react';
 
 const RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
@@ -55,7 +55,7 @@ export default function App() {
 
   // Networking state
   const peerRef = useRef(null);
-  const connectionsRef = useRef([]); // Host keeps track of connected peers
+  const connectionsRef = useRef([]); // Host keeps track of connected peer data connections
   const hostConnRef = useRef(null);   // Client keeps connection to Host
 
   // Voice Chat State
@@ -81,12 +81,57 @@ export default function App() {
       .catch(err => console.warn("Mic permission missing/denied", err));
   }, []);
 
-  // Broadcast state changes from Host to all connected Clients
+  // Broadcast state updates from Host to all active connected Clients
   const broadcastState = (payload) => {
+    connectionsRef.current = connectionsRef.current.filter(conn => conn && conn.open);
     connectionsRef.current.forEach(conn => {
-      if (conn && conn.open) {
+      try {
         conn.send({ type: 'STATE_UPDATE', data: payload });
+      } catch (err) {
+        console.error("Failed to send state update to peer:", conn.peer, err);
       }
+    });
+  };
+
+  // Handle player disconnect cleanup (Host logic)
+  const handlePlayerDisconnect = (leavingPeerId) => {
+    setPlayers(prevPlayers => {
+      const leavingPlayer = prevPlayers.find(p => p.id === leavingPeerId);
+      if (!leavingPlayer) return prevPlayers;
+
+      // Remove leaving connection from active pool
+      connectionsRef.current = connectionsRef.current.filter(c => c.peer !== leavingPeerId);
+
+      let updatedPlayers = prevPlayers.filter(p => p.id !== leavingPeerId);
+
+      // If mid-game disconnect, trigger automatic pack/fold for the leaver
+      const activePlayers = updatedPlayers.filter(p => !p.isPacked);
+      
+      let nextTurn = currentTurnIdx;
+      if (gameState === 'PLAYING') {
+        if (activePlayers.length <= 1 && activePlayers.length > 0) {
+          setTimeout(() => declareWinner(activePlayers[0], `${leavingPlayer.name} disconnected!`, pot), 100);
+        } else {
+          // Adjust turn index if needed
+          if (nextTurn >= updatedPlayers.length) {
+            nextTurn = 0;
+          }
+          while (updatedPlayers[nextTurn] && updatedPlayers[nextTurn].isPacked) {
+            nextTurn = (nextTurn + 1) % updatedPlayers.length;
+          }
+          setCurrentTurnIdx(nextTurn);
+        }
+      }
+
+      const syncPayload = {
+        players: updatedPlayers,
+        currentTurnIdx: nextTurn,
+        gameState: updatedPlayers.length === 0 ? 'LOBBY' : gameState
+      };
+
+      // Broadcast room update instantly so everyone's UI refreshes
+      setTimeout(() => broadcastState(syncPayload), 50);
+      return updatedPlayers;
     });
   };
 
@@ -95,14 +140,14 @@ export default function App() {
     e.preventDefault();
     if (!playerName.trim()) return;
 
-    // Standardized uppercase clean room code format (e.g. TP849201)
     const generatedCode = 'TP' + Math.floor(100000 + Math.random() * 900000);
     const peerId = generatedCode.toUpperCase();
     setRoomCode(peerId);
     setIsHost(true);
 
-    // Reliable public TURN/STUN configuration to bypass symmetric NATs and mobile firewalls
+    // Enhanced Public TURN/STUN Infrastructure with WebRTC Keep-Alives
     const peer = new Peer(peerId, {
+      debug: 1,
       config: {
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
@@ -110,8 +155,10 @@ export default function App() {
           { urls: 'stun:stun2.l.google.com:19302' },
           { urls: 'stun:stun3.l.google.com:19302' },
           { urls: 'stun:stun4.l.google.com:19302' },
-          { urls: 'stun:global.stun.twilio.com:3478' }
-        ]
+          { urls: 'stun:global.stun.twilio.com:3478' },
+          { urls: 'stun:relay.metered.ca:80' }
+        ],
+        iceCandidatePoolSize: 10
       }
     });
     peerRef.current = peer;
@@ -133,10 +180,21 @@ export default function App() {
     });
 
     peer.on('connection', (conn) => {
+      // Remove existing stale connections with same peer ID
+      connectionsRef.current = connectionsRef.current.filter(c => c.peer !== conn.peer);
       connectionsRef.current.push(conn);
 
-      // Handle handshake setup
+      // Handle connection disconnect event immediately
+      conn.on('close', () => {
+        handlePlayerDisconnect(conn.peer);
+      });
+
+      conn.on('error', () => {
+        handlePlayerDisconnect(conn.peer);
+      });
+
       conn.on('open', () => {
+        // Direct initial sync packet
         conn.send({ 
           type: 'STATE_UPDATE', 
           data: { 
@@ -167,9 +225,8 @@ export default function App() {
               isBot: false
             };
 
-            const updatedList = [...prev, newP];
+            const updatedList = [...prev.filter(p => p.id !== conn.peer), newP];
             
-            // Send sync packet immediately back to newly connected client and existing peers
             const syncData = { 
               players: updatedList, 
               gameState: 'WAITING', 
@@ -184,13 +241,13 @@ export default function App() {
           });
         }
 
+        if (data.type === 'LEAVE_ROOM') {
+          handlePlayerDisconnect(conn.peer);
+        }
+
         if (data.type === 'PLAYER_ACTION') {
           handleActionFromClient(data.action, data.playerId, data.payload);
         }
-      });
-
-      conn.on('error', (err) => {
-        console.error("Host connection error:", err);
       });
     });
 
@@ -203,19 +260,25 @@ export default function App() {
 
     peer.on('error', (err) => {
       console.error("PeerJS Host Error:", err);
-      alert("Room code collision or network error. Please try creating room again.");
-      setGameState('LOBBY');
+      if (err.type === 'unavailable-id') {
+        alert("Room code collision. Generating new code...");
+        handleCreateRoom(e);
+      } else {
+        alert("Signaling network error. Please click Create Room again.");
+        setGameState('LOBBY');
+      }
     });
   };
 
-  // Client Joins Room via PeerJS Code
+  // Client Joins Room via PeerJS Code with Robust Reconnection Handling
   const handleJoinRoom = (e) => {
     e.preventDefault();
     if (!playerName.trim() || !inputCode.trim()) return;
 
-    setJoinStatus('Connecting to signaling server...');
+    setJoinStatus('Establishing peer connection...');
 
     const peer = new Peer({
+      debug: 1,
       config: {
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
@@ -223,8 +286,10 @@ export default function App() {
           { urls: 'stun:stun2.l.google.com:19302' },
           { urls: 'stun:stun3.l.google.com:19302' },
           { urls: 'stun:stun4.l.google.com:19302' },
-          { urls: 'stun:global.stun.twilio.com:3478' }
-        ]
+          { urls: 'stun:global.stun.twilio.com:3478' },
+          { urls: 'stun:relay.metered.ca:80' }
+        ],
+        iceCandidatePoolSize: 10
       }
     });
     peerRef.current = peer;
@@ -234,25 +299,28 @@ export default function App() {
       setJoinStatus('Connecting to room host...');
 
       const targetHostCode = inputCode.trim().toUpperCase();
+      
+      // Setup reliable peer connection with automatic fallback timeout
       const conn = peer.connect(targetHostCode, { reliable: true });
       hostConnRef.current = conn;
 
-      // Timeout fallback if ICE candidate connection hangs
+      let isConnected = false;
+
       const connectTimeout = setTimeout(() => {
-        if (gameState !== 'WAITING') {
-          setJoinStatus('Connection timed out. Check Room Code & internet connection.');
+        if (!isConnected) {
+          setJoinStatus('Timeout connecting to host. Verify host is still in waiting room & try again.');
         }
-      }, 10000);
+      }, 1200);
 
       conn.on('open', () => {
+        isConnected = true;
         clearTimeout(connectTimeout);
-        setJoinStatus('Connected! Synchronizing table...');
+        setJoinStatus('Connected! Synchronizing room...');
         
-        // Dispatch join handshake immediately upon WebRTC datachannel open
+        // Handshake packet to host
         conn.send({ type: 'JOIN_PLAYER', name: playerName });
         setRoomCode(targetHostCode);
         setIsHost(false);
-        setGameState('WAITING');
 
         if (localStreamRef.current) {
           const call = peer.call(targetHostCode, localStreamRef.current);
@@ -260,6 +328,11 @@ export default function App() {
             attachAudioStream(targetHostCode, remoteStream);
           });
         }
+      });
+
+      conn.on('close', () => {
+        alert("Disconnected from Room Host.");
+        setGameState('LOBBY');
       });
 
       conn.on('data', (data) => {
@@ -282,15 +355,32 @@ export default function App() {
 
       conn.on('error', (err) => {
         clearTimeout(connectTimeout);
-        console.error("Client Data Connection Error:", err);
-        setJoinStatus('Failed to connect to host. Make sure host is online.');
+        console.error("Client Connection Error:", err);
+        setJoinStatus('Connection failed. Host may have left or network blocked signaling.');
       });
     });
 
     peer.on('error', (err) => {
       console.error("PeerJS Client Error:", err);
-      setJoinStatus('Signaling error: Unable to reach host room code.');
+      setJoinStatus('Signaling server error. Please check your internet connection.');
     });
+  };
+
+  // Leave Room Action
+  const handleLeaveRoom = () => {
+    if (isHost) {
+      broadcastState({ gameState: 'LOBBY' });
+      connectionsRef.current.forEach(c => c.close());
+    } else if (hostConnRef.current) {
+      hostConnRef.current.send({ type: 'LEAVE_ROOM' });
+      hostConnRef.current.close();
+    }
+    if (peerRef.current) {
+      peerRef.current.destroy();
+    }
+    setGameState('LOBBY');
+    setPlayers([]);
+    setJoinStatus('');
   };
 
   const attachAudioStream = (peerId, stream) => {
@@ -304,7 +394,6 @@ export default function App() {
     audioEl.srcObject = stream;
   };
 
-  // Start New Hand: Only add bots to reach requested maxPlayers if human seats aren't filled!
   const startNewHand = () => {
     if (!isHost) return;
 
@@ -565,7 +654,7 @@ export default function App() {
         </div>
 
         {gameState !== 'LOBBY' && (
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
             <div className="bg-slate-800/80 border border-slate-700 px-3 py-1.5 rounded-lg flex items-center gap-2">
               <span className="text-xs text-slate-400">ROOM:</span>
               <span className="font-mono font-bold text-amber-400">{roomCode}</span>
@@ -584,6 +673,15 @@ export default function App() {
             >
               {voiceMuted ? <MicOff size={16} /> : <Mic size={16} />}
               <span>{voiceMuted ? 'Muted' : 'Voice Active'}</span>
+            </button>
+
+            <button 
+              onClick={handleLeaveRoom}
+              className="p-2.5 bg-rose-600/20 hover:bg-rose-600/30 text-rose-400 border border-rose-500/30 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition"
+              title="Leave Room"
+            >
+              <LogOut size={16} />
+              <span>Leave</span>
             </button>
           </div>
         )}
@@ -662,7 +760,7 @@ export default function App() {
         {gameState === 'WAITING' && (
           <div className="w-full max-w-lg bg-slate-900 border border-slate-800 p-8 rounded-3xl text-center shadow-2xl z-10">
             <h2 className="text-xl font-bold mb-2">Private Table Ready</h2>
-            <p className="text-sm text-slate-400 mb-6">Share code with friends. Remaining unfilled seats will auto-fill with bots!</p>
+            <p className="text-sm text-slate-400 mb-6">Share code with friends. Unfilled seats auto-fill with bots when dealing!</p>
 
             <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4 mb-6 flex justify-between items-center">
               <div>
@@ -680,8 +778,8 @@ export default function App() {
 
             <div className="space-y-2 mb-6">
               <div className="flex justify-between items-center text-xs font-semibold text-slate-400 px-1">
-                <span>HUMAN PLAYERS ({players.length}/{maxPlayers})</span>
-                <span className="text-amber-400">{maxPlayers - players.length} Bot(s) will auto-fill</span>
+                <span>CONNECTED PLAYERS ({players.length}/{maxPlayers})</span>
+                <span className="text-amber-400">{Math.max(0, maxPlayers - players.length)} Bot(s) will auto-fill</span>
               </div>
               {players.map(p => (
                 <div key={p.id} className="bg-slate-950/60 border border-slate-800/80 px-4 py-3 rounded-xl flex items-center justify-between">
@@ -701,7 +799,7 @@ export default function App() {
                 onClick={startNewHand}
                 className="w-full bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-bold py-4 rounded-xl transition shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2"
               >
-                <Play size={18} fill="currentColor" /> Deal Hand ({players.length} Players + {maxPlayers - players.length} Bots)
+                <Play size={18} fill="currentColor" /> Deal Hand ({players.length} Players + {Math.max(0, maxPlayers - players.length)} Bots)
               </button>
             ) : (
               <p className="text-amber-400 text-xs font-medium animate-pulse">Waiting for host to deal hand...</p>
