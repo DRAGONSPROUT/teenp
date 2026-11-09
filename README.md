@@ -1,13 +1,12 @@
-# Private Teen Patti Arena - Auto Disconnect & Connection Timeout Fix
+# Private Teen Patti Arena - On-Table Player UI Controls Update
 
-## Fixed Issues:
-1. **Auto Player Leave Detection**: When a player closes their browser, disconnects, or clicks "Leave Room", the host detects the connection drop instantly, removes them from the table, auto-advances the turn, and broadcasts an updated state to all clients.
-2. **Eliminated Connection Timeout**: Upgraded WebRTC configuration with Metered TURN relay fallbacks and an increased ICE candidate pool (`iceCandidatePoolSize: 10`) so mobile/cellular network users bypass strict NAT firewalls without hanging on connection.
-3. **Explicit Leave Room Option**: Added a top-bar "Leave" button so users can exit cleanly at any point.
+## Changes Implemented:
+1. **On-Table In-Game Action Options**: Removed the fixed bottom footer bar and placed action buttons (**See Card**, **Pack**, **Chaal**, **Side Show**, and **Show**) directly on the felt table, anchored below the player's own seat card/badge.
+2. **P2P Connection & Peer Namespace**: Retained isolated room code logic and STUN fallback configuration for cross-device mobile joining on Netlify.
 
-## How to Test & Deploy:
+## How to Build & Deploy:
 ```bash
 npm install
 npm run build
 ```
-Upload the contents of the `dist` folder to Netlify.
+Upload contents of `dist` folder to Netlify.
