@@ -1,20 +1,16 @@
-# Private Teen Patti Arena - Online WebRTC Multiplayer Fix
+# Private Teen Patti Arena - P2P Connection Fix
 
-## Resolved Features & Enhancements
-1. **Multi-device Room Connection**: STUN/ICE signaling integration so friends on Netlify can join private room codes seamlessly across different networks.
-2. **Custom Player Count & Smart Bot Auto-Fill**: Select between 3, 4, 5, or 6 maximum seats. Bots only fill the remaining empty seats when dealing a hand without creating bot overhead.
-3. **Turn Synchronization**: State updates broadcast immediately on every action so all connected player screens update their turn indicator, pot amount, and active actions live.
-4. **Side Show Option**: "Side Show" button allows seen players to request a hand comparison with the previous player during their turn.
+## Why "Connecting to host" gets stuck:
+WebRTC peer-to-peer data channels require both devices to agree on ICE candidates. When connecting across different Wi-Fi routers, 5G/4G cellular networks, or behind NAT firewalls, standard STUN servers often fail without a full ICE configuration and an immediate handshake state reply.
 
-## Quick Start Guide
+## Applied Fixes:
+1. **Multi-Region STUN Server Fallbacks**: Added Google and Twilio public STUN relay nodes (`stun:global.stun.twilio.com:3478`).
+2. **Instant Handshake Sync**: When a client connects, the host immediately pushes a `STATE_UPDATE` handshake packet upon connection open, transitioning the client into the room lobby instantly.
+3. **Connection Timeout Handling**: Added a 10-second connection timeout fallback to reset status if a network firewall blocks the PeerJS signal.
 
+## How to Test & Deploy:
 ```bash
 npm install
-npm run dev
-```
-
-## Build for Netlify / Web Hosting
-```bash
 npm run build
 ```
-Upload contents of `dist` folder to Netlify.
+Upload the contents of the `dist` folder to Netlify.

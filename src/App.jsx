@@ -46,7 +46,7 @@ export default function App() {
   const [roomCode, setRoomCode] = useState('');
   const [inputCode, setInputCode] = useState('');
   const [playerName, setPlayerName] = useState('');
-  const [maxPlayers, setMaxPlayers] = useState(4); // 3 to 6 players customizable
+  const [maxPlayers, setMaxPlayers] = useState(4);
   const [bootAmount, setBootAmount] = useState(100);
   const [copied, setCopied] = useState(false);
   const [isHost, setIsHost] = useState(false);
@@ -72,7 +72,7 @@ export default function App() {
   const [roundTurnCount, setRoundTurnCount] = useState(0);
 
   // Side Show Request state
-  const [sideShowRequest, setSideShowRequest] = useState(null); // { requesterId, targetId, requesterName }
+  const [sideShowRequest, setSideShowRequest] = useState(null);
 
   // Initialize Mic Stream
   useEffect(() => {
@@ -95,17 +95,22 @@ export default function App() {
     e.preventDefault();
     if (!playerName.trim()) return;
 
-    // Standard short clean code format
+    // Standardized uppercase clean room code format (e.g. TP849201)
     const generatedCode = 'TP' + Math.floor(100000 + Math.random() * 900000);
-    setRoomCode(generatedCode);
+    const peerId = generatedCode.toUpperCase();
+    setRoomCode(peerId);
     setIsHost(true);
 
-    // Free cloud STUN signaling servers for reliable peer-to-peer web connection
-    const peer = new Peer(generatedCode, {
+    // Reliable public TURN/STUN configuration to bypass symmetric NATs and mobile firewalls
+    const peer = new Peer(peerId, {
       config: {
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' }
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' },
+          { urls: 'stun:stun3.l.google.com:19302' },
+          { urls: 'stun:stun4.l.google.com:19302' },
+          { urls: 'stun:global.stun.twilio.com:3478' }
         ]
       }
     });
@@ -130,6 +135,19 @@ export default function App() {
     peer.on('connection', (conn) => {
       connectionsRef.current.push(conn);
 
+      // Handle handshake setup
+      conn.on('open', () => {
+        conn.send({ 
+          type: 'STATE_UPDATE', 
+          data: { 
+            players, 
+            gameState: 'WAITING', 
+            maxPlayers, 
+            bootAmount 
+          } 
+        });
+      });
+
       conn.on('data', (data) => {
         if (data.type === 'JOIN_PLAYER') {
           setPlayers(prev => {
@@ -137,6 +155,7 @@ export default function App() {
               conn.send({ type: 'ERROR', message: 'Room is full' });
               return prev;
             }
+
             const newP = {
               id: conn.peer,
               name: data.name,
@@ -147,17 +166,19 @@ export default function App() {
               isHost: false,
               isBot: false
             };
+
             const updatedList = [...prev, newP];
             
-            // Broadcast state update immediately to all peers so turns & player lists sync
-            setTimeout(() => {
-              broadcastState({ 
-                players: updatedList, 
-                gameState: 'WAITING', 
-                maxPlayers, 
-                bootAmount 
-              });
-            }, 100);
+            // Send sync packet immediately back to newly connected client and existing peers
+            const syncData = { 
+              players: updatedList, 
+              gameState: 'WAITING', 
+              maxPlayers, 
+              bootAmount 
+            };
+
+            conn.send({ type: 'STATE_UPDATE', data: syncData });
+            broadcastState(syncData);
 
             return updatedList;
           });
@@ -167,6 +188,10 @@ export default function App() {
           handleActionFromClient(data.action, data.playerId, data.payload);
         }
       });
+
+      conn.on('error', (err) => {
+        console.error("Host connection error:", err);
+      });
     });
 
     peer.on('call', (call) => {
@@ -175,6 +200,12 @@ export default function App() {
         attachAudioStream(call.peer, remoteStream);
       });
     });
+
+    peer.on('error', (err) => {
+      console.error("PeerJS Host Error:", err);
+      alert("Room code collision or network error. Please try creating room again.");
+      setGameState('LOBBY');
+    });
   };
 
   // Client Joins Room via PeerJS Code
@@ -182,12 +213,17 @@ export default function App() {
     e.preventDefault();
     if (!playerName.trim() || !inputCode.trim()) return;
 
-    setJoinStatus('Connecting to host...');
+    setJoinStatus('Connecting to signaling server...');
+
     const peer = new Peer({
       config: {
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' }
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' },
+          { urls: 'stun:stun3.l.google.com:19302' },
+          { urls: 'stun:stun4.l.google.com:19302' },
+          { urls: 'stun:global.stun.twilio.com:3478' }
         ]
       }
     });
@@ -195,21 +231,33 @@ export default function App() {
 
     peer.on('open', (id) => {
       setMyId(id);
-      const cleanCode = inputCode.trim().toUpperCase();
-      const conn = peer.connect(cleanCode, { reliable: true });
+      setJoinStatus('Connecting to room host...');
+
+      const targetHostCode = inputCode.trim().toUpperCase();
+      const conn = peer.connect(targetHostCode, { reliable: true });
       hostConnRef.current = conn;
 
+      // Timeout fallback if ICE candidate connection hangs
+      const connectTimeout = setTimeout(() => {
+        if (gameState !== 'WAITING') {
+          setJoinStatus('Connection timed out. Check Room Code & internet connection.');
+        }
+      }, 10000);
+
       conn.on('open', () => {
-        setJoinStatus('Connected! Requesting entry...');
+        clearTimeout(connectTimeout);
+        setJoinStatus('Connected! Synchronizing table...');
+        
+        // Dispatch join handshake immediately upon WebRTC datachannel open
         conn.send({ type: 'JOIN_PLAYER', name: playerName });
-        setRoomCode(cleanCode);
+        setRoomCode(targetHostCode);
         setIsHost(false);
         setGameState('WAITING');
 
         if (localStreamRef.current) {
-          const call = peer.call(cleanCode, localStreamRef.current);
+          const call = peer.call(targetHostCode, localStreamRef.current);
           call.on('stream', (remoteStream) => {
-            attachAudioStream(cleanCode, remoteStream);
+            attachAudioStream(targetHostCode, remoteStream);
           });
         }
       });
@@ -233,9 +281,15 @@ export default function App() {
       });
 
       conn.on('error', (err) => {
-        console.error("Connection error:", err);
-        setJoinStatus('Failed to connect to room code. Verify code and internet connection.');
+        clearTimeout(connectTimeout);
+        console.error("Client Data Connection Error:", err);
+        setJoinStatus('Failed to connect to host. Make sure host is online.');
       });
+    });
+
+    peer.on('error', (err) => {
+      console.error("PeerJS Client Error:", err);
+      setJoinStatus('Signaling error: Unable to reach host room code.');
     });
   };
 
@@ -256,7 +310,6 @@ export default function App() {
 
     let updatedPlayers = [...players];
 
-    // Check if we need to auto-fill missing seats with AI Bots
     const missingSeats = maxPlayers - updatedPlayers.length;
     if (missingSeats > 0) {
       const botNames = ['Aarav (Bot)', 'Riya (Bot)', 'Vikram (Bot)', 'Ananya (Bot)', 'Karan (Bot)'];
@@ -274,7 +327,6 @@ export default function App() {
       }
     }
 
-    // Deal fresh deck
     const deck = [];
     SUITS.forEach(suit => {
       RANKS.forEach(rank => {
@@ -325,7 +377,6 @@ export default function App() {
     broadcastState(newState);
   };
 
-  // Action Dispatcher for Host & Clients
   const sendPlayerAction = (action, payload = {}) => {
     if (isHost) {
       handleActionFromClient(action, myId, payload);
@@ -334,7 +385,6 @@ export default function App() {
     }
   };
 
-  // Authoritative Host Action Handler
   const handleActionFromClient = (action, playerId, payload) => {
     if (!isHost) return;
 
@@ -355,7 +405,6 @@ export default function App() {
     } else if (action === 'SHOW') {
       executeShowdown();
     } else if (action === 'REQUEST_SIDESHOW') {
-      // Find previous active player for side show comparison
       const activeIndices = players.map((p, i) => !p.isPacked ? i : -1).filter(i => i !== -1);
       const currentPosInActive = activeIndices.indexOf(currentTurnIdx);
       const prevActiveIdx = activeIndices[(currentPosInActive - 1 + activeIndices.length) % activeIndices.length];
@@ -371,7 +420,6 @@ export default function App() {
       setSideShowRequest(reqObj);
       broadcastState({ sideShowRequest: reqObj });
 
-      // If target is bot, automatically evaluate side show
       if (targetPlayer.isBot) {
         setTimeout(() => handleSideShowResponse(true, reqObj), 1500);
       }
@@ -380,7 +428,6 @@ export default function App() {
     }
   };
 
-  // Side Show Comparison Resolution
   const handleSideShowResponse = (accepted, reqObj) => {
     if (!accepted) {
       setSideShowRequest(null);
@@ -394,7 +441,6 @@ export default function App() {
     const score1 = evaluateHand(p1.cards).score;
     const score2 = evaluateHand(p2.cards).score;
 
-    // Player with lower hand score packs/folds
     const loserId = score1 >= score2 ? p2.id : p1.id;
     const updated = players.map(p => p.id === loserId ? { ...p, isPacked: true } : p);
 
@@ -403,7 +449,6 @@ export default function App() {
     advanceTurn(updated);
   };
 
-  // Advance turn and broadcast synced state to all clients
   const advanceTurn = (currentPlayersList, updatedPot = pot) => {
     const active = currentPlayersList.filter(p => !p.isPacked);
     if (active.length === 1) {
@@ -416,7 +461,6 @@ export default function App() {
       return;
     }
 
-    // Find next non-packed player
     let nextIdx = (currentTurnIdx + 1) % currentPlayersList.length;
     while (currentPlayersList[nextIdx].isPacked) {
       nextIdx = (nextIdx + 1) % currentPlayersList.length;
@@ -433,7 +477,6 @@ export default function App() {
     });
   };
 
-  // Smart Bot decision loop
   useEffect(() => {
     if (!isHost || gameState !== 'PLAYING') return;
 
@@ -548,7 +591,6 @@ export default function App() {
 
       {/* Main Area */}
       <main className="flex-1 flex items-center justify-center p-4 relative overflow-hidden">
-        {/* LOBBY STATE */}
         {gameState === 'LOBBY' && (
           <div className="w-full max-w-md bg-slate-900 border border-slate-800 p-8 rounded-3xl shadow-2xl z-10">
             <h2 className="text-2xl font-bold text-center mb-6 text-slate-100">Private Teen Patti</h2>
@@ -617,7 +659,6 @@ export default function App() {
           </div>
         )}
 
-        {/* WAITING ROOM */}
         {gameState === 'WAITING' && (
           <div className="w-full max-w-lg bg-slate-900 border border-slate-800 p-8 rounded-3xl text-center shadow-2xl z-10">
             <h2 className="text-xl font-bold mb-2">Private Table Ready</h2>
@@ -668,11 +709,8 @@ export default function App() {
           </div>
         )}
 
-        {/* GAME TABLE */}
         {(gameState === 'PLAYING' || gameState === 'ENDED') && (
           <div className="w-full max-w-5xl h-[560px] relative rounded-[100px] bg-emerald-950 border-[14px] border-amber-900/60 shadow-[inset_0_0_80px_rgba(0,0,0,0.8)] flex items-center justify-center">
-            
-            {/* Table Pot */}
             <div className="z-10 bg-slate-950/80 backdrop-blur-md border border-amber-500/30 px-6 py-3 rounded-2xl text-center shadow-xl">
               <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">TOTAL POT</p>
               <div className="flex items-center gap-1.5 justify-center">
@@ -682,7 +720,6 @@ export default function App() {
               <p className="text-[10px] text-slate-400 mt-0.5">Stake: ${currentStake}</p>
             </div>
 
-            {/* Side Show Request Overlay */}
             {sideShowRequest && (
               <div className="absolute top-6 z-30 bg-slate-900 border border-amber-500/40 p-4 rounded-2xl shadow-2xl flex items-center gap-4 animate-in fade-in">
                 <p className="text-xs font-bold text-slate-200">
@@ -707,7 +744,6 @@ export default function App() {
               </div>
             )}
 
-            {/* Dynamic Player Seats */}
             {players.map((p, idx) => {
               const total = players.length;
               const angle = (idx / total) * 2 * Math.PI - Math.PI / 2;
@@ -723,7 +759,6 @@ export default function App() {
                     p.isPacked ? 'opacity-40 grayscale' : 'opacity-100'
                   }`}
                 >
-                  {/* Player Cards */}
                   <div className="flex gap-1 -mb-3 z-10">
                     {p.cards.map((c, cIdx) => {
                       const showCard = (p.id === myId && !p.isBlind) || (gameState === 'ENDED');
@@ -749,7 +784,6 @@ export default function App() {
                     })}
                   </div>
 
-                  {/* Player Info Badge */}
                   <div className={`px-4 py-2 rounded-2xl bg-slate-900/90 border flex flex-col items-center shadow-xl ${
                     isCurrentTurn ? 'border-amber-400 ring-4 ring-amber-400/20' : 'border-slate-800'
                   }`}>
@@ -769,7 +803,6 @@ export default function App() {
           </div>
         )}
 
-        {/* WINNER MODAL */}
         {gameState === 'ENDED' && winner && (
           <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-md z-30 flex items-center justify-center p-4">
             <div className="bg-slate-900 border border-amber-500/40 p-8 rounded-3xl text-center max-w-sm w-full shadow-2xl">
@@ -825,7 +858,6 @@ export default function App() {
                   Pack (Fold)
                 </button>
 
-                {/* Side Show Option (Available when 2+ players seen and active) */}
                 {!myPlayerObj?.isBlind && players.filter(p => !p.isPacked).length > 2 && (
                   <button 
                     onClick={() => sendPlayerAction('REQUEST_SIDESHOW')}
