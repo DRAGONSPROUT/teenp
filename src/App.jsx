@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Peer } from 'peerjs';
 import { 
   Users, Volume2, VolumeX, Shield, Play, RotateCcw, 
-  Copy, Check, Award, Eye, EyeOff, Coins, RefreshCw, Mic, MicOff
+  Copy, Check, Award, Eye, EyeOff, Coins, RefreshCw, Mic, MicOff,
+  UserCheck, ArrowRight, Zap, CheckCircle2, XCircle
 } from 'lucide-react';
 
 const RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
@@ -45,10 +46,12 @@ export default function App() {
   const [roomCode, setRoomCode] = useState('');
   const [inputCode, setInputCode] = useState('');
   const [playerName, setPlayerName] = useState('');
+  const [maxPlayers, setMaxPlayers] = useState(4); // 3 to 6 players customizable
   const [bootAmount, setBootAmount] = useState(100);
   const [copied, setCopied] = useState(false);
   const [isHost, setIsHost] = useState(false);
   const [myId, setMyId] = useState('');
+  const [joinStatus, setJoinStatus] = useState('');
 
   // Networking state
   const peerRef = useRef(null);
@@ -68,39 +71,49 @@ export default function App() {
   const [winner, setWinner] = useState(null);
   const [roundTurnCount, setRoundTurnCount] = useState(0);
 
-  // Initialize Voice Media Stream
+  // Side Show Request state
+  const [sideShowRequest, setSideShowRequest] = useState(null); // { requesterId, targetId, requesterName }
+
+  // Initialize Mic Stream
   useEffect(() => {
     navigator.mediaDevices?.getUserMedia({ audio: true, video: false })
-      .then(stream => {
-        localStreamRef.current = stream;
-      })
+      .then(stream => { localStreamRef.current = stream; })
       .catch(err => console.warn("Mic permission missing/denied", err));
   }, []);
 
-  // Broadcast state changes from Host to all Clients
-  const broadcastState = (updatedState) => {
+  // Broadcast state changes from Host to all connected Clients
+  const broadcastState = (payload) => {
     connectionsRef.current.forEach(conn => {
-      if (conn.open) {
-        conn.send({ type: 'STATE_UPDATE', data: updatedState });
+      if (conn && conn.open) {
+        conn.send({ type: 'STATE_UPDATE', data: payload });
       }
     });
   };
 
-  // Host creates room with PeerJS ID
+  // Host Creates Private Room using PeerJS
   const handleCreateRoom = (e) => {
     e.preventDefault();
     if (!playerName.trim()) return;
 
-    const generatedCode = 'TP-' + Math.floor(100000 + Math.random() * 900000);
+    // Standard short clean code format
+    const generatedCode = 'TP' + Math.floor(100000 + Math.random() * 900000);
     setRoomCode(generatedCode);
     setIsHost(true);
 
-    const peer = new Peer(generatedCode);
+    // Free cloud STUN signaling servers for reliable peer-to-peer web connection
+    const peer = new Peer(generatedCode, {
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' }
+        ]
+      }
+    });
     peerRef.current = peer;
 
     peer.on('open', (id) => {
       setMyId(id);
-      const initialHostPlayer = {
+      const hostPlayer = {
         id: id,
         name: playerName + ' (Host)',
         chips: 5000,
@@ -110,28 +123,20 @@ export default function App() {
         isHost: true,
         isBot: false
       };
-
-      // Fill remaining seats with Bots
-      const botPlayers = [
-        { id: 'bot1', name: 'Aarav (Bot)', chips: 5000, isBlind: true, cards: [], isPacked: false, isHost: false, isBot: true },
-        { id: 'bot2', name: 'Riya (Bot)', chips: 5000, isBlind: true, cards: [], isPacked: false, isHost: false, isBot: true },
-      ];
-
-      const initialPlayers = [initialHostPlayer, ...botPlayers];
-      setPlayers(initialPlayers);
+      setPlayers([hostPlayer]);
       setGameState('WAITING');
     });
 
-    // Handle incoming client player connection
     peer.on('connection', (conn) => {
       connectionsRef.current.push(conn);
 
       conn.on('data', (data) => {
         if (data.type === 'JOIN_PLAYER') {
           setPlayers(prev => {
-            // Replace a bot slot or add player
-            const nextList = [...prev];
-            const botIdx = nextList.findIndex(p => p.isBot);
+            if (prev.length >= maxPlayers) {
+              conn.send({ type: 'ERROR', message: 'Room is full' });
+              return prev;
+            }
             const newP = {
               id: conn.peer,
               name: data.name,
@@ -142,15 +147,19 @@ export default function App() {
               isHost: false,
               isBot: false
             };
+            const updatedList = [...prev, newP];
+            
+            // Broadcast state update immediately to all peers so turns & player lists sync
+            setTimeout(() => {
+              broadcastState({ 
+                players: updatedList, 
+                gameState: 'WAITING', 
+                maxPlayers, 
+                bootAmount 
+              });
+            }, 100);
 
-            if (botIdx !== -1) {
-              nextList[botIdx] = newP;
-            } else if (nextList.length < 6) {
-              nextList.push(newP);
-            }
-
-            broadcastState({ players: nextList, gameState: 'WAITING', pot, currentStake });
-            return nextList;
+            return updatedList;
           });
         }
 
@@ -160,7 +169,6 @@ export default function App() {
       });
     });
 
-    // Peer Voice Call Stream Receiver
     peer.on('call', (call) => {
       call.answer(localStreamRef.current);
       call.on('stream', (remoteStream) => {
@@ -169,43 +177,64 @@ export default function App() {
     });
   };
 
-  // Client joins room via PeerJS Code
+  // Client Joins Room via PeerJS Code
   const handleJoinRoom = (e) => {
     e.preventDefault();
     if (!playerName.trim() || !inputCode.trim()) return;
 
-    const peer = new Peer();
+    setJoinStatus('Connecting to host...');
+    const peer = new Peer({
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' }
+        ]
+      }
+    });
     peerRef.current = peer;
 
     peer.on('open', (id) => {
       setMyId(id);
-      const conn = peer.connect(inputCode.trim());
+      const cleanCode = inputCode.trim().toUpperCase();
+      const conn = peer.connect(cleanCode, { reliable: true });
       hostConnRef.current = conn;
 
       conn.on('open', () => {
+        setJoinStatus('Connected! Requesting entry...');
         conn.send({ type: 'JOIN_PLAYER', name: playerName });
-        setRoomCode(inputCode.trim());
+        setRoomCode(cleanCode);
         setIsHost(false);
         setGameState('WAITING');
 
-        // Call Host Audio Voice
         if (localStreamRef.current) {
-          const call = peer.call(inputCode.trim(), localStreamRef.current);
+          const call = peer.call(cleanCode, localStreamRef.current);
           call.on('stream', (remoteStream) => {
-            attachAudioStream(inputCode.trim(), remoteStream);
+            attachAudioStream(cleanCode, remoteStream);
           });
         }
       });
 
       conn.on('data', (data) => {
         if (data.type === 'STATE_UPDATE') {
-          if (data.data.players) setPlayers(data.data.players);
-          if (data.data.gameState) setGameState(data.data.gameState);
-          if (data.data.pot !== undefined) setPot(data.data.pot);
-          if (data.data.currentStake !== undefined) setCurrentStake(data.data.currentStake);
-          if (data.data.currentTurnIdx !== undefined) setCurrentTurnIdx(data.data.currentTurnIdx);
-          if (data.data.winner !== undefined) setWinner(data.data.winner);
+          const s = data.data;
+          if (s.players) setPlayers(s.players);
+          if (s.gameState) setGameState(s.gameState);
+          if (s.pot !== undefined) setPot(s.pot);
+          if (s.currentStake !== undefined) setCurrentStake(s.currentStake);
+          if (s.currentTurnIdx !== undefined) setCurrentTurnIdx(s.currentTurnIdx);
+          if (s.winner !== undefined) setWinner(s.winner);
+          if (s.sideShowRequest !== undefined) setSideShowRequest(s.sideShowRequest);
+          if (s.maxPlayers) setMaxPlayers(s.maxPlayers);
         }
+        if (data.type === 'ERROR') {
+          alert(data.message);
+          setGameState('LOBBY');
+        }
+      });
+
+      conn.on('error', (err) => {
+        console.error("Connection error:", err);
+        setJoinStatus('Failed to connect to room code. Verify code and internet connection.');
       });
     });
   };
@@ -221,10 +250,31 @@ export default function App() {
     audioEl.srcObject = stream;
   };
 
-  // Host Game Logic Engine
+  // Start New Hand: Only add bots to reach requested maxPlayers if human seats aren't filled!
   const startNewHand = () => {
     if (!isHost) return;
 
+    let updatedPlayers = [...players];
+
+    // Check if we need to auto-fill missing seats with AI Bots
+    const missingSeats = maxPlayers - updatedPlayers.length;
+    if (missingSeats > 0) {
+      const botNames = ['Aarav (Bot)', 'Riya (Bot)', 'Vikram (Bot)', 'Ananya (Bot)', 'Karan (Bot)'];
+      for (let i = 0; i < missingSeats; i++) {
+        updatedPlayers.push({
+          id: `bot-${Date.now()}-${i}`,
+          name: botNames[i % botNames.length],
+          chips: 5000,
+          isBlind: true,
+          cards: [],
+          isPacked: false,
+          isHost: false,
+          isBot: true
+        });
+      }
+    }
+
+    // Deal fresh deck
     const deck = [];
     SUITS.forEach(suit => {
       RANKS.forEach(rank => {
@@ -240,7 +290,7 @@ export default function App() {
     let deckIdx = 0;
     let bootCollected = 0;
 
-    const updatedPlayers = players.map(p => {
+    updatedPlayers = updatedPlayers.map(p => {
       if (p.chips < bootAmount) return { ...p, isPacked: true, cards: [] };
       bootCollected += bootAmount;
       return {
@@ -259,7 +309,8 @@ export default function App() {
       currentTurnIdx: 0,
       gameState: 'PLAYING',
       winner: null,
-      roundTurnCount: 0
+      roundTurnCount: 0,
+      sideShowRequest: null
     };
 
     setPot(bootCollected);
@@ -269,11 +320,12 @@ export default function App() {
     setGameState('PLAYING');
     setWinner(null);
     setRoundTurnCount(0);
+    setSideShowRequest(null);
 
     broadcastState(newState);
   };
 
-  // Handle player turns & actions
+  // Action Dispatcher for Host & Clients
   const sendPlayerAction = (action, payload = {}) => {
     if (isHost) {
       handleActionFromClient(action, myId, payload);
@@ -282,6 +334,7 @@ export default function App() {
     }
   };
 
+  // Authoritative Host Action Handler
   const handleActionFromClient = (action, playerId, payload) => {
     if (!isHost) return;
 
@@ -301,9 +354,56 @@ export default function App() {
       broadcastState({ players: updated });
     } else if (action === 'SHOW') {
       executeShowdown();
+    } else if (action === 'REQUEST_SIDESHOW') {
+      // Find previous active player for side show comparison
+      const activeIndices = players.map((p, i) => !p.isPacked ? i : -1).filter(i => i !== -1);
+      const currentPosInActive = activeIndices.indexOf(currentTurnIdx);
+      const prevActiveIdx = activeIndices[(currentPosInActive - 1 + activeIndices.length) % activeIndices.length];
+      const targetPlayer = players[prevActiveIdx];
+
+      const reqObj = {
+        requesterId: playerId,
+        targetId: targetPlayer.id,
+        requesterName: players.find(p => p.id === playerId)?.name,
+        targetName: targetPlayer.name
+      };
+
+      setSideShowRequest(reqObj);
+      broadcastState({ sideShowRequest: reqObj });
+
+      // If target is bot, automatically evaluate side show
+      if (targetPlayer.isBot) {
+        setTimeout(() => handleSideShowResponse(true, reqObj), 1500);
+      }
+    } else if (action === 'RESPOND_SIDESHOW') {
+      handleSideShowResponse(payload.accepted, payload.reqObj);
     }
   };
 
+  // Side Show Comparison Resolution
+  const handleSideShowResponse = (accepted, reqObj) => {
+    if (!accepted) {
+      setSideShowRequest(null);
+      broadcastState({ sideShowRequest: null });
+      return;
+    }
+
+    const p1 = players.find(p => p.id === reqObj.requesterId);
+    const p2 = players.find(p => p.id === reqObj.targetId);
+
+    const score1 = evaluateHand(p1.cards).score;
+    const score2 = evaluateHand(p2.cards).score;
+
+    // Player with lower hand score packs/folds
+    const loserId = score1 >= score2 ? p2.id : p1.id;
+    const updated = players.map(p => p.id === loserId ? { ...p, isPacked: true } : p);
+
+    setPlayers(updated);
+    setSideShowRequest(null);
+    advanceTurn(updated);
+  };
+
+  // Advance turn and broadcast synced state to all clients
   const advanceTurn = (currentPlayersList, updatedPot = pot) => {
     const active = currentPlayersList.filter(p => !p.isPacked);
     if (active.length === 1) {
@@ -316,18 +416,24 @@ export default function App() {
       return;
     }
 
-    const nextIdx = (currentTurnIdx + 1) % currentPlayersList.length;
+    // Find next non-packed player
+    let nextIdx = (currentTurnIdx + 1) % currentPlayersList.length;
+    while (currentPlayersList[nextIdx].isPacked) {
+      nextIdx = (nextIdx + 1) % currentPlayersList.length;
+    }
+
     setCurrentTurnIdx(nextIdx);
     setRoundTurnCount(prev => prev + 1);
 
     broadcastState({
       players: currentPlayersList,
       currentTurnIdx: nextIdx,
-      pot: updatedPot
+      pot: updatedPot,
+      sideShowRequest: null
     });
   };
 
-  // Bot Turn Automated Simulation
+  // Smart Bot decision loop
   useEffect(() => {
     if (!isHost || gameState !== 'PLAYING') return;
 
@@ -375,7 +481,8 @@ export default function App() {
     broadcastState({
       players: updated,
       winner: { ...winPlayer, reason },
-      gameState: 'ENDED'
+      gameState: 'ENDED',
+      sideShowRequest: null
     });
   };
 
@@ -410,7 +517,7 @@ export default function App() {
             <h1 className="font-bold text-lg tracking-wide bg-gradient-to-r from-amber-200 via-emerald-200 to-teal-200 bg-clip-text text-transparent">
               TEEN PATTI ARENA
             </h1>
-            <p className="text-xs text-slate-400">Live Peer-to-Peer Voice Room</p>
+            <p className="text-xs text-slate-400">Online Private Voice Room</p>
           </div>
         </div>
 
@@ -439,21 +546,42 @@ export default function App() {
         )}
       </header>
 
-      {/* Main Container */}
+      {/* Main Area */}
       <main className="flex-1 flex items-center justify-center p-4 relative overflow-hidden">
+        {/* LOBBY STATE */}
         {gameState === 'LOBBY' && (
           <div className="w-full max-w-md bg-slate-900 border border-slate-800 p-8 rounded-3xl shadow-2xl z-10">
-            <h2 className="text-2xl font-bold text-center mb-6 text-slate-100">Teen Patti Private Room</h2>
+            <h2 className="text-2xl font-bold text-center mb-6 text-slate-100">Private Teen Patti</h2>
             <div className="space-y-4">
               <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1.5">YOUR DISPLAY NAME</label>
+                <label className="block text-xs font-medium text-slate-400 mb-1.5">YOUR NICKNAME</label>
                 <input 
                   type="text" 
                   value={playerName} 
                   onChange={(e) => setPlayerName(e.target.value)}
-                  placeholder="Enter your nickname"
+                  placeholder="Enter name (e.g. Rahul)"
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-slate-200 focus:outline-none focus:border-amber-500 transition"
                 />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-400 mb-1.5">SELECT MAX PLAYERS (3–6)</label>
+                <div className="grid grid-cols-4 gap-2">
+                  {[3, 4, 5, 6].map(num => (
+                    <button
+                      key={num}
+                      type="button"
+                      onClick={() => setMaxPlayers(num)}
+                      className={`py-2 rounded-xl text-xs font-bold border transition ${
+                        maxPlayers === num 
+                          ? 'bg-amber-500 text-slate-950 border-amber-400' 
+                          : 'bg-slate-950 text-slate-400 border-slate-800 hover:border-slate-700'
+                      }`}
+                    >
+                      {num} Seats
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <div>
@@ -462,10 +590,14 @@ export default function App() {
                   type="text" 
                   value={inputCode} 
                   onChange={(e) => setInputCode(e.target.value)}
-                  placeholder="e.g. TP-492104"
+                  placeholder="e.g. TP492104"
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-slate-200 uppercase font-mono focus:outline-none focus:border-amber-500 transition"
                 />
               </div>
+
+              {joinStatus && (
+                <p className="text-xs text-amber-400 text-center font-medium animate-pulse">{joinStatus}</p>
+              )}
 
               <div className="pt-2 grid grid-cols-2 gap-3">
                 <button 
@@ -485,10 +617,11 @@ export default function App() {
           </div>
         )}
 
+        {/* WAITING ROOM */}
         {gameState === 'WAITING' && (
           <div className="w-full max-w-lg bg-slate-900 border border-slate-800 p-8 rounded-3xl text-center shadow-2xl z-10">
-            <h2 className="text-xl font-bold mb-2">Room Code Ready</h2>
-            <p className="text-sm text-slate-400 mb-6">Send this code to your friends. Host can fill empty seats with bots.</p>
+            <h2 className="text-xl font-bold mb-2">Private Table Ready</h2>
+            <p className="text-sm text-slate-400 mb-6">Share code with friends. Remaining unfilled seats will auto-fill with bots!</p>
 
             <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4 mb-6 flex justify-between items-center">
               <div>
@@ -505,7 +638,10 @@ export default function App() {
             </div>
 
             <div className="space-y-2 mb-6">
-              <p className="text-xs font-semibold text-slate-400 text-left">CONNECTED PLAYERS ({players.length}/6)</p>
+              <div className="flex justify-between items-center text-xs font-semibold text-slate-400 px-1">
+                <span>HUMAN PLAYERS ({players.length}/{maxPlayers})</span>
+                <span className="text-amber-400">{maxPlayers - players.length} Bot(s) will auto-fill</span>
+              </div>
               {players.map(p => (
                 <div key={p.id} className="bg-slate-950/60 border border-slate-800/80 px-4 py-3 rounded-xl flex items-center justify-between">
                   <div className="flex items-center gap-3">
@@ -524,16 +660,19 @@ export default function App() {
                 onClick={startNewHand}
                 className="w-full bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-bold py-4 rounded-xl transition shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2"
               >
-                <Play size={18} fill="currentColor" /> Deal Hand
+                <Play size={18} fill="currentColor" /> Deal Hand ({players.length} Players + {maxPlayers - players.length} Bots)
               </button>
             ) : (
-              <p className="text-amber-400 text-xs font-medium animate-pulse">Waiting for host to start hand...</p>
+              <p className="text-amber-400 text-xs font-medium animate-pulse">Waiting for host to deal hand...</p>
             )}
           </div>
         )}
 
+        {/* GAME TABLE */}
         {(gameState === 'PLAYING' || gameState === 'ENDED') && (
           <div className="w-full max-w-5xl h-[560px] relative rounded-[100px] bg-emerald-950 border-[14px] border-amber-900/60 shadow-[inset_0_0_80px_rgba(0,0,0,0.8)] flex items-center justify-center">
+            
+            {/* Table Pot */}
             <div className="z-10 bg-slate-950/80 backdrop-blur-md border border-amber-500/30 px-6 py-3 rounded-2xl text-center shadow-xl">
               <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold">TOTAL POT</p>
               <div className="flex items-center gap-1.5 justify-center">
@@ -543,6 +682,32 @@ export default function App() {
               <p className="text-[10px] text-slate-400 mt-0.5">Stake: ${currentStake}</p>
             </div>
 
+            {/* Side Show Request Overlay */}
+            {sideShowRequest && (
+              <div className="absolute top-6 z-30 bg-slate-900 border border-amber-500/40 p-4 rounded-2xl shadow-2xl flex items-center gap-4 animate-in fade-in">
+                <p className="text-xs font-bold text-slate-200">
+                  <span className="text-amber-400">{sideShowRequest.requesterName}</span> requested Side Show with <span className="text-amber-400">{sideShowRequest.targetName}</span>
+                </p>
+                {sideShowRequest.targetId === myId && (
+                  <div className="flex gap-2">
+                    <button 
+                      onClick={() => sendPlayerAction('RESPOND_SIDESHOW', { accepted: true, reqObj: sideShowRequest })}
+                      className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 p-2 rounded-xl text-xs font-bold"
+                    >
+                      <CheckCircle2 size={18} />
+                    </button>
+                    <button 
+                      onClick={() => sendPlayerAction('RESPOND_SIDESHOW', { accepted: false, reqObj: sideShowRequest })}
+                      className="bg-rose-500 hover:bg-rose-400 text-slate-950 p-2 rounded-xl text-xs font-bold"
+                    >
+                      <XCircle size={18} />
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Dynamic Player Seats */}
             {players.map((p, idx) => {
               const total = players.length;
               const angle = (idx / total) * 2 * Math.PI - Math.PI / 2;
@@ -558,6 +723,7 @@ export default function App() {
                     p.isPacked ? 'opacity-40 grayscale' : 'opacity-100'
                   }`}
                 >
+                  {/* Player Cards */}
                   <div className="flex gap-1 -mb-3 z-10">
                     {p.cards.map((c, cIdx) => {
                       const showCard = (p.id === myId && !p.isBlind) || (gameState === 'ENDED');
@@ -583,6 +749,7 @@ export default function App() {
                     })}
                   </div>
 
+                  {/* Player Info Badge */}
                   <div className={`px-4 py-2 rounded-2xl bg-slate-900/90 border flex flex-col items-center shadow-xl ${
                     isCurrentTurn ? 'border-amber-400 ring-4 ring-amber-400/20' : 'border-slate-800'
                   }`}>
@@ -602,6 +769,7 @@ export default function App() {
           </div>
         )}
 
+        {/* WINNER MODAL */}
         {gameState === 'ENDED' && winner && (
           <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-md z-30 flex items-center justify-center p-4">
             <div className="bg-slate-900 border border-amber-500/40 p-8 rounded-3xl text-center max-w-sm w-full shadow-2xl">
@@ -622,14 +790,14 @@ export default function App() {
                   <RotateCcw size={18} /> Play Next Hand
                 </button>
               ) : (
-                <p className="text-slate-400 text-xs animate-pulse">Waiting for host to start next hand...</p>
+                <p className="text-slate-400 text-xs animate-pulse">Waiting for host to deal next hand...</p>
               )}
             </div>
           </div>
         )}
       </main>
 
-      {/* Control Footer */}
+      {/* Action Footer */}
       {gameState === 'PLAYING' && (
         <footer className="border-t border-slate-800 bg-slate-900/90 backdrop-blur-md px-6 py-4 z-20">
           <div className="max-w-4xl mx-auto flex items-center justify-between">
@@ -656,6 +824,16 @@ export default function App() {
                 >
                   Pack (Fold)
                 </button>
+
+                {/* Side Show Option (Available when 2+ players seen and active) */}
+                {!myPlayerObj?.isBlind && players.filter(p => !p.isPacked).length > 2 && (
+                  <button 
+                    onClick={() => sendPlayerAction('REQUEST_SIDESHOW')}
+                    className="bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border border-indigo-500/40 px-5 py-3 rounded-xl font-bold text-sm transition flex items-center gap-1.5"
+                  >
+                    <Zap size={16} /> Side Show
+                  </button>
+                )}
 
                 {players.filter(p => !p.isPacked).length === 2 && (
                   <button 
