@@ -63,6 +63,7 @@ export default function App() {
   const [gameStatus, setGameStatus] = useState('waiting');
   const [turnCount, setTurnCount] = useState(0);
   const [winnerModal, setWinnerModal] = useState(null);
+  const [sideShowModal, setSideShowModal] = useState(null);
   const [copied, setCopied] = useState(false);
 
   // Voice Chat States & Refs
@@ -83,6 +84,8 @@ export default function App() {
   const currentStakeRef = useRef(currentStake);
   const turnCountRef = useRef(turnCount);
   const gameStatusRef = useRef(gameStatus);
+  const sideShowModalRef = useRef(sideShowModal);
+  const winnerModalRef = useRef(winnerModal);
 
   useEffect(() => { playersRef.current = players; }, [players]);
   useEffect(() => { isHostRef.current = isHost; }, [isHost]);
@@ -91,6 +94,8 @@ export default function App() {
   useEffect(() => { currentStakeRef.current = currentStake; }, [currentStake]);
   useEffect(() => { turnCountRef.current = turnCount; }, [turnCount]);
   useEffect(() => { gameStatusRef.current = gameStatus; }, [gameStatus]);
+  useEffect(() => { sideShowModalRef.current = sideShowModal; }, [sideShowModal]);
+  useEffect(() => { winnerModalRef.current = winnerModal; }, [winnerModal]);
 
   useEffect(() => {
     return () => {
@@ -103,7 +108,6 @@ export default function App() {
     };
   }, []);
 
-  // Mobile-Optimized Voice Chat Toggle Logic
   const toggleMic = async () => {
     if (!localStreamRef.current) {
       try {
@@ -118,7 +122,6 @@ export default function App() {
         localStreamRef.current = stream;
         setMicMuted(false);
 
-        // Initiate call to existing peers
         Object.keys(connectionsRef.current).forEach(remotePeerId => {
           if (peerRef.current && !mediaCallsRef.current[remotePeerId]) {
             const call = peerRef.current.call(remotePeerId, stream);
@@ -130,7 +133,6 @@ export default function App() {
         setErrorMessage('Microphone permission required. Allow mic access in browser.');
       }
     } else {
-      // Toggle track status smoothly without destroying media stream
       const tracks = localStreamRef.current.getAudioTracks();
       if (tracks.length > 0) {
         const nextState = !tracks[0].enabled;
@@ -173,7 +175,6 @@ export default function App() {
     });
   };
 
-  // Build a standard 52-card deck & Fisher-Yates shuffle
   const createShuffledDeck = () => {
     const values = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
     const deck = [];
@@ -198,6 +199,7 @@ export default function App() {
   };
 
   const evaluateHand = (cards) => {
+    if (!cards || cards.length < 3) return { rank: 0, name: 'Invalid', score: 0 };
     const sorted = [...cards].sort((a, b) => b.numVal - a.numVal);
     const isFlush = sorted[0].suit === sorted[1].suit && sorted[1].suit === sorted[2].suit;
     
@@ -298,7 +300,8 @@ export default function App() {
               gameStatus: gameStatusRef.current,
               currentStake: currentStakeRef.current,
               turnCount: turnCountRef.current,
-              winnerModal
+              winnerModal: winnerModalRef.current,
+              sideShowModal: sideShowModalRef.current
             });
           }
           return updated;
@@ -420,7 +423,8 @@ export default function App() {
           gameStatus: gameStatusRef.current,
           currentStake: currentStakeRef.current,
           turnCount: turnCountRef.current,
-          winnerModal
+          winnerModal: winnerModalRef.current,
+          sideShowModal: sideShowModalRef.current
         };
 
         conn.send({ type: 'SYNC_STATE', payload: statePayload });
@@ -435,13 +439,23 @@ export default function App() {
       setCurrentStake(data.payload.currentStake);
       setTurnCount(data.payload.turnCount);
       setWinnerModal(data.payload.winnerModal || null);
+      setSideShowModal(data.payload.sideShowModal || null);
       setInLobby(false);
       setConnStatus('Connected');
-    } else if (['ACTION_CHAAL', 'ACTION_PACK', 'ACTION_SEE_CARDS'].includes(data.type)) {
+    } else if (['ACTION_CHAAL', 'ACTION_PACK', 'ACTION_SEE_CARDS', 'REQUEST_SIDESHOW', 'RESPOND_SIDESHOW', 'SHOW_CARDS'].includes(data.type)) {
       handleActionMessage(data);
     }
   };
 
+  const getPreviousActivePlayerIndex = (fromIndex, currentPlayersList) => {
+    let prevIndex = (fromIndex - 1 + currentPlayersList.length) % currentPlayersList.length;
+    while (currentPlayersList[prevIndex] && currentPlayersList[prevIndex].folded) {
+      prevIndex = (prevIndex - 1 + currentPlayersList.length) % currentPlayersList.length;
+    }
+    return prevIndex;
+  };
+
+  // Centralized Host Action & Turn Handler with Cumulative Pot Addition
   const handleActionMessage = (actionData) => {
     if (!isHostRef.current) return;
 
@@ -451,12 +465,13 @@ export default function App() {
     let newTurnCount = turnCountRef.current;
     let newStake = currentStakeRef.current;
     let newGameStatus = gameStatusRef.current;
-    let currentWinnerModal = winnerModal;
+    let newWinnerModal = winnerModalRef.current;
+    let newSideShowModal = sideShowModalRef.current;
 
     if (actionData.type === 'ACTION_CHAAL') {
       const { playerId, amount } = actionData.payload;
       updatedPlayers = updatedPlayers.map(p => p.id === playerId ? { ...p, chips: p.chips - amount } : p);
-      newPot += amount;
+      newPot += amount; // Accumulate bet into live total pot
       
       const active = updatedPlayers.filter(p => !p.folded);
       if (active.length === 1) {
@@ -484,6 +499,62 @@ export default function App() {
     } else if (actionData.type === 'ACTION_SEE_CARDS') {
       const { playerId } = actionData.payload;
       updatedPlayers = updatedPlayers.map(p => p.id === playerId ? { ...p, isBlind: false } : p);
+    } else if (actionData.type === 'REQUEST_SIDESHOW') {
+      const { requesterId } = actionData.payload;
+      const requester = updatedPlayers.find(p => p.id === requesterId);
+      const requesterIdx = updatedPlayers.findIndex(p => p.id === requesterId);
+      const targetIdx = getPreviousActivePlayerIndex(requesterIdx, updatedPlayers);
+      const target = updatedPlayers[targetIdx];
+
+      if (target && target.isBot) {
+        // Auto-handle sideshow for Bot target
+        const requesterEval = evaluateHand(requester.cards);
+        const botEval = evaluateHand(target.cards);
+        
+        let loserId = requesterId;
+        if (requesterEval.rank > botEval.rank || (requesterEval.rank === botEval.rank && requesterEval.score >= botEval.score)) {
+          loserId = target.id;
+        }
+
+        updatedPlayers = updatedPlayers.map(p => p.id === loserId ? { ...p, folded: true } : p);
+        const active = updatedPlayers.filter(p => !p.folded);
+        if (active.length === 1) {
+          handleWinnerHost(active[0], updatedPlayers, newPot);
+          return;
+        }
+        newTurn = getNextTurnIndexHost(newTurn, updatedPlayers);
+      } else if (target) {
+        newSideShowModal = {
+          requester,
+          target
+        };
+      }
+    } else if (actionData.type === 'RESPOND_SIDESHOW') {
+      const { accepted } = actionData.payload;
+      if (accepted && newSideShowModal) {
+        const reqPlayer = updatedPlayers.find(p => p.id === newSideShowModal.requester.id);
+        const targetPlayer = updatedPlayers.find(p => p.id === newSideShowModal.target.id);
+
+        const reqEval = evaluateHand(reqPlayer.cards);
+        const targetEval = evaluateHand(targetPlayer.cards);
+
+        let loserId = reqPlayer.id;
+        if (reqEval.rank > targetEval.rank || (reqEval.rank === targetEval.rank && reqEval.score >= targetEval.score)) {
+          loserId = targetPlayer.id;
+        }
+
+        updatedPlayers = updatedPlayers.map(p => p.id === loserId ? { ...p, folded: true } : p);
+        const active = updatedPlayers.filter(p => !p.folded);
+        if (active.length === 1) {
+          handleWinnerHost(active[0], updatedPlayers, newPot);
+          return;
+        }
+        newTurn = getNextTurnIndexHost(newTurn, updatedPlayers);
+      }
+      newSideShowModal = null;
+    } else if (actionData.type === 'SHOW_CARDS') {
+      handleShowdownHost(updatedPlayers, newPot);
+      return;
     }
 
     setPlayers(updatedPlayers);
@@ -492,6 +563,7 @@ export default function App() {
     setTurnCount(newTurnCount);
     setCurrentStake(newStake);
     setGameStatus(newGameStatus);
+    setSideShowModal(newSideShowModal);
 
     broadcastState({
       players: updatedPlayers,
@@ -500,7 +572,8 @@ export default function App() {
       gameStatus: newGameStatus,
       currentStake: newStake,
       turnCount: newTurnCount,
-      winnerModal: currentWinnerModal
+      winnerModal: newWinnerModal,
+      sideShowModal: newSideShowModal
     });
   };
 
@@ -538,7 +611,6 @@ export default function App() {
     }
   }, [currentTurn, gameStatus, isHost, players, currentStake, turnCount]);
 
-  // Deal Unique Hands from a 52-Card Deck
   const startGame = () => {
     let currentPlayers = [...players];
     const neededBots = maxSeats - currentPlayers.length;
@@ -574,6 +646,7 @@ export default function App() {
     setTurnCount(1);
     setGameStatus('playing');
     setWinnerModal(null);
+    setSideShowModal(null);
 
     if (isHost) {
       broadcastState({
@@ -583,12 +656,12 @@ export default function App() {
         gameStatus: 'playing',
         currentStake: bootAmount,
         turnCount: 1,
-        winnerModal: null
+        winnerModal: null,
+        sideShowModal: null
       });
     }
   };
 
-  // Synchronized Round Winner Modal Broadcast
   const handleWinnerHost = (winner, updatedPlayers, finalPot) => {
     const winningEval = evaluateHand(winner.cards);
     const finalPlayers = updatedPlayers.map(p => p.id === winner.id ? { ...p, chips: p.chips + finalPot } : p);
@@ -602,6 +675,7 @@ export default function App() {
     setPlayers(finalPlayers);
     setGameStatus('ended');
     setWinnerModal(winModalData);
+    setSideShowModal(null);
 
     broadcastState({
       players: finalPlayers,
@@ -610,7 +684,8 @@ export default function App() {
       gameStatus: 'ended',
       currentStake: currentStakeRef.current,
       turnCount: turnCountRef.current,
-      winnerModal: winModalData
+      winnerModal: winModalData,
+      sideShowModal: null
     });
   };
 
@@ -652,11 +727,34 @@ export default function App() {
     });
   };
 
+  const onSideShowClick = (player) => {
+    sendActionToHostOrPeers({
+      type: 'REQUEST_SIDESHOW',
+      payload: { requesterId: player.id }
+    });
+  };
+
+  const onShowCardsClick = () => {
+    sendActionToHostOrPeers({
+      type: 'SHOW_CARDS',
+      payload: {}
+    });
+  };
+
+  const respondSideShow = (accepted) => {
+    sendActionToHostOrPeers({
+      type: 'RESPOND_SIDESHOW',
+      payload: { accepted }
+    });
+  };
+
   const copyCode = () => {
     navigator.clipboard.writeText(roomCode);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
+
+  const activePlayers = players.filter(p => !p.folded);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans relative overflow-hidden">
@@ -897,7 +995,6 @@ export default function App() {
                         )}
                       </div>
 
-                      {/* Cards Display with explicit values */}
                       {gameStatus === 'playing' && player.cards && player.cards.length > 0 && (
                         <div className="flex gap-1 mt-2">
                           {player.cards.map((card, cIdx) => (
@@ -924,6 +1021,7 @@ export default function App() {
                         </div>
                       )}
 
+                      {/* On-Table Action Panel with Side Show & Showdown Controls */}
                       {isUser && gameStatus === 'playing' && isCurrentTurn && (
                         <div className="mt-3 flex items-center gap-2 bg-slate-950/95 border border-emerald-500/40 p-2 rounded-2xl shadow-2xl backdrop-blur">
                           {player.isBlind && (
@@ -946,12 +1044,61 @@ export default function App() {
                           >
                             Chaal (${player.isBlind ? currentStake : currentStake * 2})
                           </button>
+                          {activePlayers.length >= 3 && !player.isBlind && (
+                            <button 
+                              onClick={() => onSideShowClick(player)}
+                              className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 rounded-xl text-xs font-bold text-amber-300 transition"
+                            >
+                              Side Show
+                            </button>
+                          )}
+                          {activePlayers.length === 2 && (
+                            <button 
+                              onClick={onShowCardsClick} 
+                              className="px-3 py-1.5 bg-teal-500 hover:bg-teal-400 text-slate-950 rounded-xl text-xs font-extrabold transition"
+                            >
+                              Show
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>
                   );
                 })}
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Interactive Side Show Prompt Modal */}
+        {sideShowModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 max-w-sm w-full text-center shadow-2xl">
+              <RefreshCw className="w-8 h-8 text-amber-400 mx-auto mb-3 animate-spin" />
+              <h3 className="font-bold text-slate-100 text-lg">Side Show Request</h3>
+              <p className="text-xs text-slate-400 mt-1 mb-6">
+                <span className="text-slate-200 font-bold">{sideShowModal.requester.name}</span> has requested a side show hand comparison with <span className="text-slate-200 font-bold">{sideShowModal.target.name}</span>.
+              </p>
+              {sideShowModal.target.id === myPlayerId ? (
+                <div className="flex gap-3">
+                  <button 
+                    onClick={() => respondSideShow(false)} 
+                    className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold rounded-xl text-xs transition"
+                  >
+                    Reject
+                  </button>
+                  <button 
+                    onClick={() => respondSideShow(true)} 
+                    className="flex-1 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-xl text-xs transition shadow-lg shadow-emerald-500/20"
+                  >
+                    Accept
+                  </button>
+                </div>
+              ) : (
+                <div className="text-xs text-amber-400 font-medium italic animate-pulse">
+                  Waiting for {sideShowModal.target.name} to accept or reject...
+                </div>
+              )}
             </div>
           </div>
         )}
