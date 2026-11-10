@@ -4,10 +4,11 @@ A full-featured, private multiplayer Teen Patti web application built with React
 
 ## Features
 - **Platforms & Tech Stack**: Responsive Web App with React, Vite, Tailwind CSS, PeerJS for real-time P2P multiplayer.
-- **Dynamic Sideshow Feature**: Allows seen players to request hand comparison with the previous active player, syncs prompt across WebRTC, and folds the losing hand.
-- **Accurate Pot Accumulation**: Correctly accumulates all boot amounts and chaal bets into the live pot and awards the entire accumulated pot to the winner.
-- **52-Card Deck Dealing System**: Guarantees non-repeating, unique 3-card hand dealing without plain/blank cards.
-- **Synchronized Result Screen & Voice Chat**: Real-time voice calls and result screen sync across all connected clients.
+- **Unlimited Turns & On-Table Winner Banner**: Removed the 12-turn forced showdown limit. Round winner and hand info display directly inside the table center banner upon fold or showdown.
+- **All Cards Revealed on Showdown**: When a round ends, all remaining active players' cards are revealed to everyone on the table.
+- **Dynamic Sideshow Feature**: Allows seen players to request hand comparisons.
+- **Accurate Cumulative Pot**: Dynamically tracks chaal bets and boot amounts into the total pot.
+- **52-Card Deck System & WebRTC Voice Chat**: Unique card dealing and mobile-optimized P2P mic streaming.
 
 ## Getting Started
 1. Run `pnpm install`

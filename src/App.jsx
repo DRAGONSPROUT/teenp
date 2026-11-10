@@ -62,7 +62,7 @@ export default function App() {
   const [currentStake, setCurrentStake] = useState(50);
   const [gameStatus, setGameStatus] = useState('waiting');
   const [turnCount, setTurnCount] = useState(0);
-  const [winnerModal, setWinnerModal] = useState(null);
+  const [roundResult, setRoundResult] = useState(null);
   const [sideShowModal, setSideShowModal] = useState(null);
   const [copied, setCopied] = useState(false);
 
@@ -85,7 +85,7 @@ export default function App() {
   const turnCountRef = useRef(turnCount);
   const gameStatusRef = useRef(gameStatus);
   const sideShowModalRef = useRef(sideShowModal);
-  const winnerModalRef = useRef(winnerModal);
+  const roundResultRef = useRef(roundResult);
 
   useEffect(() => { playersRef.current = players; }, [players]);
   useEffect(() => { isHostRef.current = isHost; }, [isHost]);
@@ -95,7 +95,7 @@ export default function App() {
   useEffect(() => { turnCountRef.current = turnCount; }, [turnCount]);
   useEffect(() => { gameStatusRef.current = gameStatus; }, [gameStatus]);
   useEffect(() => { sideShowModalRef.current = sideShowModal; }, [sideShowModal]);
-  useEffect(() => { winnerModalRef.current = winnerModal; }, [winnerModal]);
+  useEffect(() => { roundResultRef.current = roundResult; }, [roundResult]);
 
   useEffect(() => {
     return () => {
@@ -300,7 +300,7 @@ export default function App() {
               gameStatus: gameStatusRef.current,
               currentStake: currentStakeRef.current,
               turnCount: turnCountRef.current,
-              winnerModal: winnerModalRef.current,
+              roundResult: roundResultRef.current,
               sideShowModal: sideShowModalRef.current
             });
           }
@@ -423,7 +423,7 @@ export default function App() {
           gameStatus: gameStatusRef.current,
           currentStake: currentStakeRef.current,
           turnCount: turnCountRef.current,
-          winnerModal: winnerModalRef.current,
+          roundResult: roundResultRef.current,
           sideShowModal: sideShowModalRef.current
         };
 
@@ -438,7 +438,7 @@ export default function App() {
       setGameStatus(data.payload.gameStatus);
       setCurrentStake(data.payload.currentStake);
       setTurnCount(data.payload.turnCount);
-      setWinnerModal(data.payload.winnerModal || null);
+      setRoundResult(data.payload.roundResult || null);
       setSideShowModal(data.payload.sideShowModal || null);
       setInLobby(false);
       setConnStatus('Connected');
@@ -455,7 +455,7 @@ export default function App() {
     return prevIndex;
   };
 
-  // Centralized Host Action & Turn Handler with Cumulative Pot Addition
+  // Centralized Host Action & Turn Handler (NO 12-turn limit)
   const handleActionMessage = (actionData) => {
     if (!isHostRef.current) return;
 
@@ -465,21 +465,17 @@ export default function App() {
     let newTurnCount = turnCountRef.current;
     let newStake = currentStakeRef.current;
     let newGameStatus = gameStatusRef.current;
-    let newWinnerModal = winnerModalRef.current;
+    let newRoundResult = roundResultRef.current;
     let newSideShowModal = sideShowModalRef.current;
 
     if (actionData.type === 'ACTION_CHAAL') {
       const { playerId, amount } = actionData.payload;
       updatedPlayers = updatedPlayers.map(p => p.id === playerId ? { ...p, chips: p.chips - amount } : p);
-      newPot += amount; // Accumulate bet into live total pot
+      newPot += amount;
       
       const active = updatedPlayers.filter(p => !p.folded);
       if (active.length === 1) {
         handleWinnerHost(active[0], updatedPlayers, newPot);
-        return;
-      }
-      if (newTurnCount >= 12) {
-        handleShowdownHost(updatedPlayers, newPot);
         return;
       }
 
@@ -507,7 +503,6 @@ export default function App() {
       const target = updatedPlayers[targetIdx];
 
       if (target && target.isBot) {
-        // Auto-handle sideshow for Bot target
         const requesterEval = evaluateHand(requester.cards);
         const botEval = evaluateHand(target.cards);
         
@@ -524,10 +519,7 @@ export default function App() {
         }
         newTurn = getNextTurnIndexHost(newTurn, updatedPlayers);
       } else if (target) {
-        newSideShowModal = {
-          requester,
-          target
-        };
+        newSideShowModal = { requester, target };
       }
     } else if (actionData.type === 'RESPOND_SIDESHOW') {
       const { accepted } = actionData.payload;
@@ -572,7 +564,7 @@ export default function App() {
       gameStatus: newGameStatus,
       currentStake: newStake,
       turnCount: newTurnCount,
-      winnerModal: newWinnerModal,
+      roundResult: newRoundResult,
       sideShowModal: newSideShowModal
     });
   };
@@ -645,7 +637,7 @@ export default function App() {
     setCurrentTurn(0);
     setTurnCount(1);
     setGameStatus('playing');
-    setWinnerModal(null);
+    setRoundResult(null);
     setSideShowModal(null);
 
     if (isHost) {
@@ -656,17 +648,24 @@ export default function App() {
         gameStatus: 'playing',
         currentStake: bootAmount,
         turnCount: 1,
-        winnerModal: null,
+        roundResult: null,
         sideShowModal: null
       });
     }
   };
 
+  // On-Table Winner Handler: Reveals all active cards & sets on-table result banner
   const handleWinnerHost = (winner, updatedPlayers, finalPot) => {
     const winningEval = evaluateHand(winner.cards);
-    const finalPlayers = updatedPlayers.map(p => p.id === winner.id ? { ...p, chips: p.chips + finalPot } : p);
     
-    const winModalData = {
+    // Reveal all cards for all players on game end
+    const finalPlayers = updatedPlayers.map(p => ({
+      ...p,
+      isBlind: false,
+      chips: p.id === winner.id ? p.chips + finalPot : p.chips
+    }));
+    
+    const resData = {
       winner,
       handName: winningEval.name,
       amount: finalPot
@@ -674,7 +673,7 @@ export default function App() {
 
     setPlayers(finalPlayers);
     setGameStatus('ended');
-    setWinnerModal(winModalData);
+    setRoundResult(resData);
     setSideShowModal(null);
 
     broadcastState({
@@ -684,7 +683,7 @@ export default function App() {
       gameStatus: 'ended',
       currentStake: currentStakeRef.current,
       turnCount: turnCountRef.current,
-      winnerModal: winModalData,
+      roundResult: resData,
       sideShowModal: null
     });
   };
@@ -908,14 +907,37 @@ export default function App() {
             <div className="w-full aspect-[16/9] max-h-[580px] bg-slate-900 border-[12px] border-emerald-900/60 rounded-[120px] relative shadow-[0_0_80px_rgba(16,185,129,0.15)] flex flex-col items-center justify-center p-6 border-emerald-950">
               <div className="absolute inset-4 rounded-[100px] border border-emerald-500/20 bg-gradient-to-b from-emerald-950/40 to-slate-950/80 pointer-events-none" />
 
-              <div className="relative z-10 flex flex-col items-center mb-4">
-                <div className="bg-slate-950/90 border border-emerald-500/30 px-6 py-2 rounded-full shadow-lg text-center backdrop-blur">
+              {/* Central Table Header & On-Table Result Display */}
+              <div className="relative z-10 flex flex-col items-center mb-4 text-center">
+                <div className="bg-slate-950/90 border border-emerald-500/30 px-6 py-2 rounded-full shadow-lg backdrop-blur">
                   <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 block">Total Pot</span>
                   <span className="text-2xl font-black text-emerald-400 tracking-tight">${pot}</span>
                 </div>
+
                 {gameStatus === 'playing' && (
                   <div className="mt-2 text-xs font-mono text-slate-400 bg-slate-900/80 px-3 py-1 rounded-full border border-slate-800">
-                    Turn <span className="text-emerald-400 font-bold">{turnCount}</span>/12 • Stake: <span className="text-emerald-400 font-bold">${currentStake}</span>
+                    Stake: <span className="text-emerald-400 font-bold">${currentStake}</span>
+                  </div>
+                )}
+
+                {/* On-Table Winner Result Banner */}
+                {gameStatus === 'ended' && roundResult && (
+                  <div className="mt-3 bg-slate-950/95 border border-emerald-500/50 p-4 rounded-2xl shadow-2xl backdrop-blur max-w-md flex flex-col items-center gap-1.5 animate-fade-in">
+                    <Trophy className="w-7 h-7 text-amber-400 animate-bounce" />
+                    <h3 className="font-extrabold text-xl text-slate-100 tracking-tight">
+                      {roundResult.winner.name} Wins ${roundResult.amount}!
+                    </h3>
+                    <span className="text-xs font-semibold text-emerald-400 uppercase tracking-wider">
+                      {roundResult.handName}
+                    </span>
+                    {isHost && (
+                      <button 
+                        onClick={startGame}
+                        className="mt-2 px-5 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold rounded-xl text-xs transition shadow-md shadow-emerald-500/20"
+                      >
+                        Play Next Hand
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -951,6 +973,7 @@ export default function App() {
 
                   const isCurrentTurn = gameStatus === 'playing' && currentTurn === idx;
                   const isUser = player.id === myPlayerId;
+                  const revealCard = (isUser && !player.isBlind) || gameStatus === 'ended';
 
                   return (
                     <div 
@@ -995,18 +1018,19 @@ export default function App() {
                         )}
                       </div>
 
-                      {gameStatus === 'playing' && player.cards && player.cards.length > 0 && (
+                      {/* Cards Display with full reveal on game ending */}
+                      {(gameStatus === 'playing' || gameStatus === 'ended') && player.cards && player.cards.length > 0 && (
                         <div className="flex gap-1 mt-2">
                           {player.cards.map((card, cIdx) => (
                             <div 
                               key={cIdx} 
                               className={`w-9 h-12 rounded-md border flex flex-col items-center justify-center font-bold shadow-md ${
-                                isUser && !player.isBlind 
+                                revealCard 
                                   ? 'bg-slate-100 border-slate-300 text-slate-900' 
                                   : 'bg-slate-800 border-slate-700 text-slate-400'
                               }`}
                             >
-                              {isUser && !player.isBlind ? (
+                              {revealCard ? (
                                 <>
                                   <span className={`text-[11px] leading-none font-black ${card.color}`}>{card.value}</span>
                                   <span className={`text-xs ${card.color}`}>{card.suit}</span>
@@ -1021,7 +1045,7 @@ export default function App() {
                         </div>
                       )}
 
-                      {/* On-Table Action Panel with Side Show & Showdown Controls */}
+                      {/* On-Table Action Panel */}
                       {isUser && gameStatus === 'playing' && isCurrentTurn && (
                         <div className="mt-3 flex items-center gap-2 bg-slate-950/95 border border-emerald-500/40 p-2 rounded-2xl shadow-2xl backdrop-blur">
                           {player.isBlind && (
@@ -1077,7 +1101,7 @@ export default function App() {
               <RefreshCw className="w-8 h-8 text-amber-400 mx-auto mb-3 animate-spin" />
               <h3 className="font-bold text-slate-100 text-lg">Side Show Request</h3>
               <p className="text-xs text-slate-400 mt-1 mb-6">
-                <span className="text-slate-200 font-bold">{sideShowModal.requester.name}</span> has requested a side show hand comparison with <span className="text-slate-200 font-bold">{sideShowModal.target.name}</span>.
+                <span className="text-slate-200 font-bold">{sideShowModal.requester.name}</span> requested a side show comparison with <span className="text-slate-200 font-bold">{sideShowModal.target.name}</span>.
               </p>
               {sideShowModal.target.id === myPlayerId ? (
                 <div className="flex gap-3">
@@ -1098,31 +1122,6 @@ export default function App() {
                 <div className="text-xs text-amber-400 font-medium italic animate-pulse">
                   Waiting for {sideShowModal.target.name} to accept or reject...
                 </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Universal Winner Screen Modal */}
-        {winnerModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-md p-4">
-            <div className="bg-slate-900 border border-emerald-500/40 rounded-3xl p-6 max-w-sm w-full text-center shadow-2xl">
-              <Trophy className="w-12 h-12 text-amber-400 mx-auto mb-2 animate-bounce" />
-              <h3 className="font-extrabold text-2xl text-slate-100">{winnerModal.winner.name} Wins!</h3>
-              <p className="text-xs font-semibold text-emerald-400 uppercase tracking-wider mt-1">{winnerModal.handName}</p>
-              <div className="my-6 bg-slate-950 border border-slate-800 py-3 rounded-2xl">
-                <span className="text-xs text-slate-400 block">Total Pot Won</span>
-                <span className="text-3xl font-black text-emerald-400">${winnerModal.amount}</span>
-              </div>
-              {isHost ? (
-                <button 
-                  onClick={startGame}
-                  className="w-full py-3 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-extrabold rounded-xl shadow-lg shadow-emerald-500/20"
-                >
-                  Play Next Hand
-                </button>
-              ) : (
-                <div className="text-xs text-slate-400 italic">Waiting for host to start the next hand...</div>
               )}
             </div>
           </div>
