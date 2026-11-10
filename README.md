@@ -4,7 +4,8 @@ A full-featured, private multiplayer Teen Patti web application built with React
 
 ## Features
 - **Platforms & Tech Stack**: Responsive Web App with React, Vite, Tailwind CSS, PeerJS for real-time P2P multiplayer.
-- **Reliable WebRTC P2P**: Multi-region STUN/TURN fallback relays, sanitized peer ID routing, bidirectional handshakes, and automatic reconnect keep-alives so remote friends can join private tables across different networks (Wi-Fi, 4G/5G).
+- **Real-Time Voice Chat**: Enables actual microphone stream sharing via WebRTC media calls so all connected players in the room can talk to each other.
+- **Synchronized Turn State**: PeerJS action broadcasting ensures current turn index, pot amounts, cards, and turn counters update in real-time on all clients.
 
 ## Getting Started
 1. Run `pnpm install`

@@ -28,7 +28,6 @@ const SUITS = [
 
 const BOT_NAMES = ['Aarav', 'Vihaan', 'Ananya', 'Diya', 'Kabir', 'Rohan'];
 
-// ICE Servers configuration with multi-region STUN/TURN servers to allow cross-network connections (Wi-Fi vs Mobile Data)
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
@@ -66,27 +65,102 @@ export default function App() {
   const [winnerModal, setWinnerModal] = useState(null);
   const [copied, setCopied] = useState(false);
 
+  // Voice Chat States
+  const [micMuted, setMicMuted] = useState(true);
+  const [audioMuted, setAudioMuted] = useState(false);
+  const localStreamRef = useRef(null);
+  const mediaCallsRef = useRef({});
+  const audioElementsRef = useRef({});
+
   const peerRef = useRef(null);
   const connectionsRef = useRef({});
   const playersRef = useRef(players);
   const isHostRef = useRef(isHost);
+  const currentTurnRef = useRef(currentTurn);
+  const potRef = useRef(pot);
+  const currentStakeRef = useRef(currentStake);
+  const turnCountRef = useRef(turnCount);
+  const gameStatusRef = useRef(gameStatus);
 
-  useEffect(() => {
-    playersRef.current = players;
-  }, [players]);
+  useEffect(() => { playersRef.current = players; }, [players]);
+  useEffect(() => { isHostRef.current = isHost; }, [isHost]);
+  useEffect(() => { currentTurnRef.current = currentTurn; }, [currentTurn]);
+  useEffect(() => { potRef.current = pot; }, [pot]);
+  useEffect(() => { currentStakeRef.current = currentStake; }, [currentStake]);
+  useEffect(() => { turnCountRef.current = turnCount; }, [turnCount]);
+  useEffect(() => { gameStatusRef.current = gameStatus; }, [gameStatus]);
 
-  useEffect(() => {
-    isHostRef.current = isHost;
-  }, [isHost]);
-
-  // Clean up PeerJS on component unmount
+  // Clean up PeerJS & Audio Streams on unmount
   useEffect(() => {
     return () => {
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(track => track.stop());
+      }
       if (peerRef.current) {
         peerRef.current.destroy();
       }
     };
   }, []);
+
+  // Voice Chat: Handle Mic Toggle
+  const toggleMic = async () => {
+    if (micMuted) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        localStreamRef.current = stream;
+        setMicMuted(false);
+
+        // Call all active peer connections with local audio stream
+        Object.keys(connectionsRef.current).forEach(peerId => {
+          if (peerRef.current && !mediaCallsRef.current[peerId]) {
+            const call = peerRef.current.call(peerId, stream);
+            setupMediaCall(call, peerId);
+          }
+        });
+      } catch (err) {
+        console.error('Microphone access denied:', err);
+        setErrorMessage('Microphone access failed. Please allow microphone permissions.');
+      }
+    } else {
+      if (localStreamRef.current) {
+        localStreamRef.current.getAudioTracks().forEach(track => {
+          track.enabled = false;
+        });
+      }
+      setMicMuted(true);
+    }
+  };
+
+  const setupMediaCall = (call, remotePeerId) => {
+    mediaCallsRef.current[remotePeerId] = call;
+
+    call.on('stream', (remoteStream) => {
+      let audioEl = audioElementsRef.current[remotePeerId];
+      if (!audioEl) {
+        audioEl = document.createElement('audio');
+        audioEl.autoplay = true;
+        audioElementsRef.current[remotePeerId] = audioEl;
+      }
+      audioEl.srcObject = remoteStream;
+      audioEl.muted = audioMuted;
+    });
+
+    call.on('close', () => {
+      delete mediaCallsRef.current[remotePeerId];
+      if (audioElementsRef.current[remotePeerId]) {
+        audioElementsRef.current[remotePeerId].remove();
+        delete audioElementsRef.current[remotePeerId];
+      }
+    });
+  };
+
+  const toggleAudioOutput = () => {
+    const nextMutedState = !audioMuted;
+    setAudioMuted(nextMutedState);
+    Object.values(audioElementsRef.current).forEach(audioEl => {
+      if (audioEl) audioEl.muted = nextMutedState;
+    });
+  };
 
   const generateCard = () => {
     const values = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
@@ -129,6 +203,17 @@ export default function App() {
     });
   };
 
+  const sendActionToHostOrPeers = (actionData) => {
+    if (isHostRef.current) {
+      handleActionMessage(actionData);
+    } else {
+      const hostConn = Object.values(connectionsRef.current)[0];
+      if (hostConn && hostConn.open) {
+        hostConn.send(actionData);
+      }
+    }
+  };
+
   const sanitizeCode = (code) => code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 
   const createRoom = () => {
@@ -142,9 +227,7 @@ export default function App() {
     setMyPlayerId(hostId);
     setConnStatus('Initializing peer room...');
 
-    if (peerRef.current) {
-      peerRef.current.destroy();
-    }
+    if (peerRef.current) peerRef.current.destroy();
 
     const peer = new Peer(hostId, {
       config: { iceServers: ICE_SERVERS },
@@ -152,7 +235,6 @@ export default function App() {
     });
 
     peer.on('open', (id) => {
-      console.log('Host room ready:', id);
       const initialHostPlayer = {
         id: hostId,
         name: playerName.trim() || 'Host',
@@ -170,8 +252,6 @@ export default function App() {
     });
 
     peer.on('connection', (conn) => {
-      console.log('Incoming client connection:', conn.peer);
-
       conn.on('open', () => {
         connectionsRef.current[conn.peer] = conn;
       });
@@ -181,31 +261,30 @@ export default function App() {
       });
 
       conn.on('close', () => {
-        console.log('Player disconnected:', conn.peer);
         delete connectionsRef.current[conn.peer];
         setPlayers(prev => {
           const updated = prev.filter(p => p.id !== conn.peer);
           if (isHostRef.current) {
             broadcastState({
               players: updated,
-              pot,
-              currentTurn,
-              gameStatus,
-              currentStake,
-              turnCount
+              pot: potRef.current,
+              currentTurn: currentTurnRef.current,
+              gameStatus: gameStatusRef.current,
+              currentStake: currentStakeRef.current,
+              turnCount: turnCountRef.current
             });
           }
           return updated;
         });
       });
+    });
 
-      conn.on('error', (err) => {
-        console.error('Connection error:', err);
-      });
+    peer.on('call', (call) => {
+      call.answer(localStreamRef.current || undefined);
+      setupMediaCall(call, call.peer);
     });
 
     peer.on('error', (err) => {
-      console.error('Host peer error:', err);
       if (err.type === 'unavailable-id') {
         setErrorMessage('Room code collision. Please click Create again.');
       } else {
@@ -237,23 +316,19 @@ export default function App() {
     setIsHost(false);
     setConnStatus('Connecting to room ' + cleanCode + '...');
 
-    if (peerRef.current) {
-      peerRef.current.destroy();
-    }
+    if (peerRef.current) peerRef.current.destroy();
 
     const peer = new Peer(guestId, {
       config: { iceServers: ICE_SERVERS },
       debug: 1
     });
 
-    peer.on('open', (id) => {
-      console.log('Guest peer opened:', id);
+    peer.on('open', () => {
       const conn = peer.connect(hostPeerId, { reliable: true });
 
       conn.on('open', () => {
-        console.log('Connected to host:', hostPeerId);
         connectionsRef.current[hostPeerId] = conn;
-        setConnStatus('Handshake established! Synchronizing...');
+        setConnStatus('Connected! Requesting to join seat...');
 
         conn.send({
           type: 'JOIN_REQUEST',
@@ -275,13 +350,16 @@ export default function App() {
       });
 
       conn.on('error', (err) => {
-        console.error('Guest connection error:', err);
         setErrorMessage('Failed to connect to host. Check room code.');
       });
     });
 
+    peer.on('call', (call) => {
+      call.answer(localStreamRef.current || undefined);
+      setupMediaCall(call, call.peer);
+    });
+
     peer.on('error', (err) => {
-      console.error('Guest peer error:', err);
       setErrorMessage('Unable to connect to room. Please check the code or network connection.');
       setConnStatus('');
     });
@@ -310,11 +388,11 @@ export default function App() {
 
         const statePayload = {
           players: updated,
-          pot,
-          currentTurn,
-          gameStatus,
-          currentStake,
-          turnCount
+          pot: potRef.current,
+          currentTurn: currentTurnRef.current,
+          gameStatus: gameStatusRef.current,
+          currentStake: currentStakeRef.current,
+          turnCount: turnCountRef.current
         };
 
         conn.send({ type: 'SYNC_STATE', payload: statePayload });
@@ -330,11 +408,77 @@ export default function App() {
       setTurnCount(data.payload.turnCount);
       setInLobby(false);
       setConnStatus('Connected');
-    } else if (data.type === 'ACTION_CHAAL') {
-      handleChaal(data.payload.playerId, data.payload.amount);
-    } else if (data.type === 'ACTION_PACK') {
-      handlePack(data.payload.playerId);
+    } else if (['ACTION_CHAAL', 'ACTION_PACK', 'ACTION_SEE_CARDS'].includes(data.type)) {
+      handleActionMessage(data);
     }
+  };
+
+  const handleActionMessage = (actionData) => {
+    if (!isHostRef.current) return;
+
+    let updatedPlayers = [...playersRef.current];
+    let newPot = potRef.current;
+    let newTurn = currentTurnRef.current;
+    let newTurnCount = turnCountRef.current;
+    let newStake = currentStakeRef.current;
+    let newGameStatus = gameStatusRef.current;
+
+    if (actionData.type === 'ACTION_CHAAL') {
+      const { playerId, amount } = actionData.payload;
+      updatedPlayers = updatedPlayers.map(p => p.id === playerId ? { ...p, chips: p.chips - amount } : p);
+      newPot += amount;
+      
+      const active = updatedPlayers.filter(p => !p.folded);
+      if (active.length === 1) {
+        handleWinnerHost(active[0], updatedPlayers, newPot);
+        return;
+      }
+      if (newTurnCount >= 12) {
+        handleShowdownHost(updatedPlayers, newPot);
+        return;
+      }
+
+      newTurn = getNextTurnIndexHost(newTurn, updatedPlayers);
+      newTurnCount += 1;
+    } else if (actionData.type === 'ACTION_PACK') {
+      const { playerId } = actionData.payload;
+      updatedPlayers = updatedPlayers.map(p => p.id === playerId ? { ...p, folded: true } : p);
+      
+      const active = updatedPlayers.filter(p => !p.folded);
+      if (active.length === 1) {
+        handleWinnerHost(active[0], updatedPlayers, newPot);
+        return;
+      }
+
+      newTurn = getNextTurnIndexHost(newTurn, updatedPlayers);
+    } else if (actionData.type === 'ACTION_SEE_CARDS') {
+      const { playerId } = actionData.payload;
+      updatedPlayers = updatedPlayers.map(p => p.id === playerId ? { ...p, isBlind: false } : p);
+    }
+
+    setPlayers(updatedPlayers);
+    setPot(newPot);
+    setCurrentTurn(newTurn);
+    setTurnCount(newTurnCount);
+    setCurrentStake(newStake);
+    setGameStatus(newGameStatus);
+
+    broadcastState({
+      players: updatedPlayers,
+      pot: newPot,
+      currentTurn: newTurn,
+      gameStatus: newGameStatus,
+      currentStake: newStake,
+      turnCount: newTurnCount
+    });
+  };
+
+  const getNextTurnIndexHost = (fromIndex, currentPlayersList) => {
+    let next = (fromIndex + 1) % currentPlayersList.length;
+    while (currentPlayersList[next] && currentPlayersList[next].folded) {
+      next = (next + 1) % currentPlayersList.length;
+    }
+    return next;
   };
 
   const startGame = () => {
@@ -383,66 +527,29 @@ export default function App() {
     }
   };
 
-  const getNextTurnIndex = (fromIndex) => {
-    let next = (fromIndex + 1) % players.length;
-    while (players[next].folded) {
-      next = (next + 1) % players.length;
-    }
-    return next;
-  };
-
-  const advanceTurn = () => {
-    const active = players.filter(p => !p.folded);
-    if (active.length === 1) {
-      handleWinner(active[0]);
-      return;
-    }
-
-    if (turnCount >= 12) {
-      handleShowdown();
-      return;
-    }
-
-    const nextIndex = getNextTurnIndex(currentTurn);
-    setCurrentTurn(nextIndex);
-    setTurnCount(prev => prev + 1);
-  };
-
-  const handleChaal = (playerId, amount) => {
-    setPlayers(prev => prev.map(p => p.id === playerId ? { ...p, chips: p.chips - amount } : p));
-    setPot(prev => prev + amount);
-    advanceTurn();
-  };
-
-  const handlePack = (playerId) => {
-    const updated = players.map(p => p.id === playerId ? { ...p, folded: true } : p);
-    setPlayers(updated);
-    
-    const remaining = updated.filter(p => !p.folded);
-    if (remaining.length === 1) {
-      handleWinner(remaining[0]);
-    } else {
-      advanceTurn();
-    }
-  };
-
-  const handleSeeCards = (playerId) => {
-    setPlayers(prev => prev.map(p => p.id === playerId ? { ...p, isBlind: false } : p));
-  };
-
-  const handleWinner = (winner, evalResult = null) => {
-    const winningEval = evalResult || evaluateHand(winner.cards);
-    setPlayers(prev => prev.map(p => p.id === winner.id ? { ...p, chips: p.chips + pot } : p));
+  const handleWinnerHost = (winner, updatedPlayers, finalPot) => {
+    const winningEval = evaluateHand(winner.cards);
+    const finalPlayers = updatedPlayers.map(p => p.id === winner.id ? { ...p, chips: p.chips + finalPot } : p);
+    setPlayers(finalPlayers);
+    setGameStatus('ended');
     setWinnerModal({
       winner,
       handName: winningEval.name,
-      amount: pot
+      amount: finalPot
     });
-    setGameStatus('ended');
+
+    broadcastState({
+      players: finalPlayers,
+      pot: finalPot,
+      currentTurn: currentTurnRef.current,
+      gameStatus: 'ended',
+      currentStake: currentStakeRef.current,
+      turnCount: turnCountRef.current
+    });
   };
 
-  const handleShowdown = () => {
-    const active = players.filter(p => !p.folded);
+  const handleShowdownHost = (updatedPlayers, finalPot) => {
+    const active = updatedPlayers.filter(p => !p.folded);
     let bestPlayer = active[0];
     let bestEval = evaluateHand(active[0].cards);
 
@@ -454,7 +561,30 @@ export default function App() {
       }
     });
 
-    handleWinner(bestPlayer, bestEval);
+    handleWinnerHost(bestPlayer, updatedPlayers, finalPot);
+  };
+
+  // Handle Player Action Triggers
+  const onChaalClick = (player) => {
+    const amount = player.isBlind ? currentStake : currentStake * 2;
+    sendActionToHostOrPeers({
+      type: 'ACTION_CHAAL',
+      payload: { playerId: player.id, amount }
+    });
+  };
+
+  const onPackClick = (player) => {
+    sendActionToHostOrPeers({
+      type: 'ACTION_PACK',
+      payload: { playerId: player.id }
+    });
+  };
+
+  const onSeeCardsClick = (player) => {
+    sendActionToHostOrPeers({
+      type: 'ACTION_SEE_CARDS',
+      payload: { playerId: player.id }
+    });
   };
 
   const copyCode = () => {
@@ -476,7 +606,7 @@ export default function App() {
             <h1 className="font-extrabold text-lg tracking-tight bg-gradient-to-r from-emerald-400 to-teal-300 bg-clip-text text-transparent">
               PRIVATE TEEN PATTI
             </h1>
-            <p className="text-xs text-slate-400 font-medium">Real-time WebRTC Private Multiplayer</p>
+            <p className="text-xs text-slate-400 font-medium">Real-time WebRTC Voice Chat & P2P Sync</p>
           </div>
         </div>
 
@@ -489,16 +619,32 @@ export default function App() {
                 {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
               </button>
             </div>
-            <button 
-              onClick={() => {
-                setInLobby(true);
-                if (peerRef.current) peerRef.current.destroy();
-              }} 
-              className="p-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-400 hover:bg-rose-500/20 transition"
-              title="Leave Room"
-            >
-              <LogOut className="w-4 h-4" />
-            </button>
+            <div className="flex items-center gap-2 border-l border-slate-800 pl-4">
+              <button 
+                onClick={toggleMic} 
+                className={`p-2 rounded-lg border transition ${micMuted ? 'bg-slate-900 border-slate-800 text-slate-400' : 'bg-emerald-500/20 border-emerald-500/50 text-emerald-400 animate-pulse'}`}
+                title={micMuted ? "Unmute Mic" : "Mute Mic"}
+              >
+                {micMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+              </button>
+              <button 
+                onClick={toggleAudioOutput} 
+                className={`p-2 rounded-lg border transition ${audioMuted ? 'bg-slate-900 border-slate-800 text-slate-400' : 'bg-emerald-500/20 border-emerald-500/50 text-emerald-400'}`}
+                title={audioMuted ? "Unmute Audio" : "Mute Audio"}
+              >
+                {audioMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+              </button>
+              <button 
+                onClick={() => {
+                  setInLobby(true);
+                  if (peerRef.current) peerRef.current.destroy();
+                }} 
+                className="p-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-400 hover:bg-rose-500/20 transition"
+                title="Leave Room"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         )}
       </header>
@@ -507,7 +653,7 @@ export default function App() {
         {inLobby ? (
           <div className="w-full max-w-md bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-2xl backdrop-blur">
             <h2 className="text-xl font-bold text-slate-100 mb-1">Join or Create Private Table</h2>
-            <p className="text-xs text-slate-400 mb-4">Play real-time WebRTC 3-card Poker with friends across networks</p>
+            <p className="text-xs text-slate-400 mb-4">Play real-time WebRTC 3-card Poker with live Voice Chat</p>
 
             {errorMessage && (
               <div className="mb-4 p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-rose-300 text-xs flex items-center gap-2">
@@ -628,7 +774,7 @@ export default function App() {
                       Start Game Now
                     </button>
                   ) : (
-                    <div className="text-xs text-amber-400 font-medium">Waiting for the host to start the game...</div>
+                    <div className="text-xs text-amber-400 font-medium">Waiting for host to deal cards...</div>
                   )}
                 </div>
               )}
@@ -696,21 +842,21 @@ export default function App() {
                         <div className="mt-3 flex items-center gap-2 bg-slate-950/95 border border-emerald-500/40 p-2 rounded-2xl shadow-2xl backdrop-blur">
                           {player.isBlind && (
                             <button 
-                              onClick={() => handleSeeCards(player.id)} 
-                              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-xs font-bold text-slate-200"
+                              onClick={() => onSeeCardsClick(player)} 
+                              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-xs font-bold text-slate-200 flex items-center gap-1"
                             >
                               <Eye className="w-3 h-3 text-emerald-400" /> See Cards
                             </button>
                           )}
                           <button 
-                            onClick={() => handlePack(player.id)} 
+                            onClick={() => onPackClick(player)} 
                             className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 rounded-xl text-xs font-bold text-rose-300"
                           >
                             Pack
                           </button>
                           <button 
-                            onClick={() => handleChaal(player.id, player.isBlind ? currentStake : currentStake * 2)} 
-                            className="px-4 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 rounded-xl text-xs font-extrabold"
+                            onClick={() => onChaalClick(player)} 
+                            className="px-4 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 rounded-xl text-xs font-extrabold shadow-md shadow-emerald-500/20"
                           >
                             Chaal (${player.isBlind ? currentStake : currentStake * 2})
                           </button>
