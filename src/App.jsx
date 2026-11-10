@@ -20,10 +20,10 @@ const CARD_VALUES = {
 };
 
 const SUITS = [
-  { symbol: '♠', name: 'spades', color: 'text-slate-100' },
-  { symbol: '♥', name: 'hearts', color: 'text-rose-500' },
-  { symbol: '♦', name: 'diamonds', color: 'text-rose-500' },
-  { symbol: '♣', name: 'clubs', color: 'text-slate-100' }
+  { symbol: '♠', name: 'spades', color: 'text-slate-900' },
+  { symbol: '♥', name: 'hearts', color: 'text-rose-600' },
+  { symbol: '♦', name: 'diamonds', color: 'text-rose-600' },
+  { symbol: '♣', name: 'clubs', color: 'text-slate-900' }
 ];
 
 const BOT_NAMES = ['Aarav', 'Vihaan', 'Ananya', 'Diya', 'Kabir', 'Rohan'];
@@ -74,8 +74,8 @@ export default function App() {
 
   const peerRef = useRef(null);
   const connectionsRef = useRef({});
-  
-  // Real-time Master Refs to prevent stale closure state during bot timers & action handlers
+
+  // Real-time Master Refs to prevent stale closures
   const playersRef = useRef(players);
   const isHostRef = useRef(isHost);
   const currentTurnRef = useRef(currentTurn);
@@ -92,7 +92,6 @@ export default function App() {
   useEffect(() => { turnCountRef.current = turnCount; }, [turnCount]);
   useEffect(() => { gameStatusRef.current = gameStatus; }, [gameStatus]);
 
-  // Clean up PeerJS & Audio Streams on unmount
   useEffect(() => {
     return () => {
       if (localStreamRef.current) {
@@ -104,9 +103,9 @@ export default function App() {
     };
   }, []);
 
-  // Voice Chat: Mic Toggle with noise suppression & echo cancellation
+  // Mobile-Optimized Voice Chat Toggle Logic
   const toggleMic = async () => {
-    if (micMuted) {
+    if (!localStreamRef.current) {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ 
           audio: {
@@ -119,7 +118,7 @@ export default function App() {
         localStreamRef.current = stream;
         setMicMuted(false);
 
-        // Call all active peers to stream voice
+        // Initiate call to existing peers
         Object.keys(connectionsRef.current).forEach(remotePeerId => {
           if (peerRef.current && !mediaCallsRef.current[remotePeerId]) {
             const call = peerRef.current.call(remotePeerId, stream);
@@ -128,15 +127,16 @@ export default function App() {
         });
       } catch (err) {
         console.error('Microphone access denied:', err);
-        setErrorMessage('Microphone access failed. Please enable permissions.');
+        setErrorMessage('Microphone permission required. Allow mic access in browser.');
       }
     } else {
-      if (localStreamRef.current) {
-        localStreamRef.current.getAudioTracks().forEach(track => {
-          track.enabled = false;
-        });
+      // Toggle track status smoothly without destroying media stream
+      const tracks = localStreamRef.current.getAudioTracks();
+      if (tracks.length > 0) {
+        const nextState = !tracks[0].enabled;
+        tracks[0].enabled = nextState;
+        setMicMuted(!nextState);
       }
-      setMicMuted(true);
     }
   };
 
@@ -163,10 +163,6 @@ export default function App() {
         delete audioElementsRef.current[remotePeerId];
       }
     });
-
-    call.on('error', (err) => {
-      console.error('Media call error:', err);
-    });
   };
 
   const toggleAudioOutput = () => {
@@ -177,14 +173,29 @@ export default function App() {
     });
   };
 
-  const generateCard = () => {
+  // Build a standard 52-card deck & Fisher-Yates shuffle
+  const createShuffledDeck = () => {
     const values = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
-    const val = values[Math.floor(Math.random() * values.length)];
-    const suit = SUITS[Math.floor(Math.random() * SUITS.length)];
-    return { value: val, suit: suit.symbol, color: suit.color, numVal: CARD_VALUES[val] };
-  };
+    const deck = [];
+    
+    values.forEach(val => {
+      SUITS.forEach(suit => {
+        deck.push({
+          value: val,
+          suit: suit.symbol,
+          color: suit.color,
+          numVal: CARD_VALUES[val]
+        });
+      });
+    });
 
-  const generateHand = () => [generateCard(), generateCard(), generateCard()];
+    for (let i = deck.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [deck[i], deck[j]] = [deck[j], deck[i]];
+    }
+
+    return deck;
+  };
 
   const evaluateHand = (cards) => {
     const sorted = [...cards].sort((a, b) => b.numVal - a.numVal);
@@ -286,7 +297,8 @@ export default function App() {
               currentTurn: currentTurnRef.current,
               gameStatus: gameStatusRef.current,
               currentStake: currentStakeRef.current,
-              turnCount: turnCountRef.current
+              turnCount: turnCountRef.current,
+              winnerModal
             });
           }
           return updated;
@@ -301,9 +313,9 @@ export default function App() {
 
     peer.on('error', (err) => {
       if (err.type === 'unavailable-id') {
-        setErrorMessage('Room code collision. Please click Create again.');
+        setErrorMessage('Room code collision. Click Create again.');
       } else {
-        setErrorMessage('Peer connection error: ' + err.message);
+        setErrorMessage('Peer error: ' + err.message);
       }
       setConnStatus('');
     });
@@ -320,7 +332,7 @@ export default function App() {
 
     const cleanCode = sanitizeCode(roomCode);
     if (cleanCode.length !== 6) {
-      setErrorMessage('Room code must be 6 alphanumeric characters.');
+      setErrorMessage('Room code must be 6 characters.');
       return;
     }
 
@@ -365,7 +377,7 @@ export default function App() {
       });
 
       conn.on('error', () => {
-        setErrorMessage('Failed to connect to host. Check room code.');
+        setErrorMessage('Failed to connect to host.');
       });
     });
 
@@ -374,8 +386,8 @@ export default function App() {
       setupMediaCall(call, call.peer);
     });
 
-    peer.on('error', (err) => {
-      setErrorMessage('Unable to connect to room. Please check the code or network connection.');
+    peer.on('error', () => {
+      setErrorMessage('Unable to connect to room. Check code or network.');
       setConnStatus('');
     });
 
@@ -407,7 +419,8 @@ export default function App() {
           currentTurn: currentTurnRef.current,
           gameStatus: gameStatusRef.current,
           currentStake: currentStakeRef.current,
-          turnCount: turnCountRef.current
+          turnCount: turnCountRef.current,
+          winnerModal
         };
 
         conn.send({ type: 'SYNC_STATE', payload: statePayload });
@@ -421,6 +434,7 @@ export default function App() {
       setGameStatus(data.payload.gameStatus);
       setCurrentStake(data.payload.currentStake);
       setTurnCount(data.payload.turnCount);
+      setWinnerModal(data.payload.winnerModal || null);
       setInLobby(false);
       setConnStatus('Connected');
     } else if (['ACTION_CHAAL', 'ACTION_PACK', 'ACTION_SEE_CARDS'].includes(data.type)) {
@@ -428,7 +442,6 @@ export default function App() {
     }
   };
 
-  // Centralized Host Action Handler
   const handleActionMessage = (actionData) => {
     if (!isHostRef.current) return;
 
@@ -438,6 +451,7 @@ export default function App() {
     let newTurnCount = turnCountRef.current;
     let newStake = currentStakeRef.current;
     let newGameStatus = gameStatusRef.current;
+    let currentWinnerModal = winnerModal;
 
     if (actionData.type === 'ACTION_CHAAL') {
       const { playerId, amount } = actionData.payload;
@@ -485,7 +499,8 @@ export default function App() {
       currentTurn: newTurn,
       gameStatus: newGameStatus,
       currentStake: newStake,
-      turnCount: newTurnCount
+      turnCount: newTurnCount,
+      winnerModal: currentWinnerModal
     });
   };
 
@@ -497,7 +512,7 @@ export default function App() {
     return next;
   };
 
-  // Host Bot Turn Controller: Listens for turn updates and triggers bot choices seamlessly
+  // Bot Turn Automation Engine
   useEffect(() => {
     if (!isHost || gameStatus !== 'playing') return;
 
@@ -523,6 +538,7 @@ export default function App() {
     }
   }, [currentTurn, gameStatus, isHost, players, currentStake, turnCount]);
 
+  // Deal Unique Hands from a 52-Card Deck
   const startGame = () => {
     let currentPlayers = [...players];
     const neededBots = maxSeats - currentPlayers.length;
@@ -540,9 +556,11 @@ export default function App() {
       });
     }
 
+    const deck = createShuffledDeck();
+
     const dealtPlayers = currentPlayers.map(p => ({
       ...p,
-      cards: generateHand(),
+      cards: [deck.pop(), deck.pop(), deck.pop()],
       isBlind: true,
       folded: false,
       chips: p.chips - bootAmount
@@ -564,21 +582,26 @@ export default function App() {
         currentTurn: 0,
         gameStatus: 'playing',
         currentStake: bootAmount,
-        turnCount: 1
+        turnCount: 1,
+        winnerModal: null
       });
     }
   };
 
+  // Synchronized Round Winner Modal Broadcast
   const handleWinnerHost = (winner, updatedPlayers, finalPot) => {
     const winningEval = evaluateHand(winner.cards);
     const finalPlayers = updatedPlayers.map(p => p.id === winner.id ? { ...p, chips: p.chips + finalPot } : p);
-    setPlayers(finalPlayers);
-    setGameStatus('ended');
-    setWinnerModal({
+    
+    const winModalData = {
       winner,
       handName: winningEval.name,
       amount: finalPot
-    });
+    };
+
+    setPlayers(finalPlayers);
+    setGameStatus('ended');
+    setWinnerModal(winModalData);
 
     broadcastState({
       players: finalPlayers,
@@ -586,7 +609,8 @@ export default function App() {
       currentTurn: currentTurnRef.current,
       gameStatus: 'ended',
       currentStake: currentStakeRef.current,
-      turnCount: turnCountRef.current
+      turnCount: turnCountRef.current,
+      winnerModal: winModalData
     });
   };
 
@@ -836,7 +860,6 @@ export default function App() {
                       style={{ left: `${x}%`, top: `${y}%` }}
                       className="absolute -translate-x-1/2 -translate-y-1/2 pointer-events-auto flex flex-col items-center"
                     >
-                      {/* Player Badge with Explicit BLIND / SEEN / FOLDED Badges */}
                       <div className={`relative flex items-center gap-2 px-3 py-1.5 rounded-xl border transition-all backdrop-blur ${
                         isCurrentTurn 
                           ? 'bg-emerald-950/90 border-emerald-400 shadow-[0_0_15px_rgba(52,211,153,0.4)] scale-105' 
@@ -855,7 +878,6 @@ export default function App() {
                           <span className="text-[10px] font-mono text-emerald-400">${player.chips}</span>
                         </div>
 
-                        {/* Visible Status Indicators across all player screens */}
                         {gameStatus === 'playing' && (
                           <div className="ml-1 flex items-center">
                             {player.folded ? (
@@ -875,32 +897,33 @@ export default function App() {
                         )}
                       </div>
 
-                      {/* Cards Container */}
+                      {/* Cards Display with explicit values */}
                       {gameStatus === 'playing' && player.cards && player.cards.length > 0 && (
                         <div className="flex gap-1 mt-2">
                           {player.cards.map((card, cIdx) => (
                             <div 
                               key={cIdx} 
-                              className={`w-9 h-12 rounded-md border flex flex-col items-center justify-center font-bold text-xs shadow-md ${
+                              className={`w-9 h-12 rounded-md border flex flex-col items-center justify-center font-bold shadow-md ${
                                 isUser && !player.isBlind 
                                   ? 'bg-slate-100 border-slate-300 text-slate-900' 
-                                  : 'bg-slate-800 border-slate-700 text-slate-600'
+                                  : 'bg-slate-800 border-slate-700 text-slate-400'
                               }`}
                             >
                               {isUser && !player.isBlind ? (
                                 <>
-                                  <span className={`text-[10px] leading-none ${card.color}`}>{card.value}</span>
+                                  <span className={`text-[11px] leading-none font-black ${card.color}`}>{card.value}</span>
                                   <span className={`text-xs ${card.color}`}>{card.suit}</span>
                                 </>
                               ) : (
-                                <div className="w-full h-full border border-slate-700/50 rounded flex items-center justify-center">🂠</div>
+                                <div className="w-full h-full border border-slate-700/50 rounded flex items-center justify-center text-xs font-mono">
+                                  🂠
+                                </div>
                               )}
                             </div>
                           ))}
                         </div>
                       )}
 
-                      {/* Dynamic Control Panel directly under user seat */}
                       {isUser && gameStatus === 'playing' && isCurrentTurn && (
                         <div className="mt-3 flex items-center gap-2 bg-slate-950/95 border border-emerald-500/40 p-2 rounded-2xl shadow-2xl backdrop-blur">
                           {player.isBlind && (
@@ -933,6 +956,7 @@ export default function App() {
           </div>
         )}
 
+        {/* Universal Winner Screen Modal */}
         {winnerModal && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-md p-4">
             <div className="bg-slate-900 border border-emerald-500/40 rounded-3xl p-6 max-w-sm w-full text-center shadow-2xl">
@@ -943,13 +967,15 @@ export default function App() {
                 <span className="text-xs text-slate-400 block">Total Pot Won</span>
                 <span className="text-3xl font-black text-emerald-400">${winnerModal.amount}</span>
               </div>
-              {isHost && (
+              {isHost ? (
                 <button 
                   onClick={startGame}
                   className="w-full py-3 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-extrabold rounded-xl shadow-lg shadow-emerald-500/20"
                 >
                   Play Next Hand
                 </button>
+              ) : (
+                <div className="text-xs text-slate-400 italic">Waiting for host to start the next hand...</div>
               )}
             </div>
           </div>

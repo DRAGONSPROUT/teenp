@@ -4,9 +4,9 @@ A full-featured, private multiplayer Teen Patti web application built with React
 
 ## Features
 - **Platforms & Tech Stack**: Responsive Web App with React, Vite, Tailwind CSS, PeerJS for real-time P2P multiplayer.
-- **Synced Player Badges & Statuses**: Real-time broadcast of BLIND, SEEN, and FOLDED badges visible on every player seat.
-- **Host-Driven Smart Bot Execution**: Host engine manages bot timers, turn decisions (Chaal, Pack), and broadcasts updated state to all connected peers.
-- **Stable Peer-to-Peer Voice Chat**: Clean WebRTC audio tracks, automatic track renegotiation, mute state synchronization, and echo cancellation settings.
+- **52-Card Deck Dealing System**: Guarantees non-repeating, unique 3-card hand dealing without plain/blank cards.
+- **Synchronized Result Screen**: Winners, hand rankings, and pot values are broadcast to all players at the end of each round.
+- **Robust Mobile & Toggle Mic Voice Chat**: Supports iOS/Android browser mic permissions and track toggling (`track.enabled`) without stream loss.
 
 ## Getting Started
 1. Run `pnpm install`
