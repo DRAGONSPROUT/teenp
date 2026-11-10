@@ -65,7 +65,7 @@ export default function App() {
   const [winnerModal, setWinnerModal] = useState(null);
   const [copied, setCopied] = useState(false);
 
-  // Voice Chat States
+  // Voice Chat States & Refs
   const [micMuted, setMicMuted] = useState(true);
   const [audioMuted, setAudioMuted] = useState(false);
   const localStreamRef = useRef(null);
@@ -74,6 +74,8 @@ export default function App() {
 
   const peerRef = useRef(null);
   const connectionsRef = useRef({});
+  
+  // Real-time Master Refs to prevent stale closure state during bot timers & action handlers
   const playersRef = useRef(players);
   const isHostRef = useRef(isHost);
   const currentTurnRef = useRef(currentTurn);
@@ -102,24 +104,31 @@ export default function App() {
     };
   }, []);
 
-  // Voice Chat: Handle Mic Toggle
+  // Voice Chat: Mic Toggle with noise suppression & echo cancellation
   const toggleMic = async () => {
     if (micMuted) {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }, 
+          video: false 
+        });
         localStreamRef.current = stream;
         setMicMuted(false);
 
-        // Call all active peer connections with local audio stream
-        Object.keys(connectionsRef.current).forEach(peerId => {
-          if (peerRef.current && !mediaCallsRef.current[peerId]) {
-            const call = peerRef.current.call(peerId, stream);
-            setupMediaCall(call, peerId);
+        // Call all active peers to stream voice
+        Object.keys(connectionsRef.current).forEach(remotePeerId => {
+          if (peerRef.current && !mediaCallsRef.current[remotePeerId]) {
+            const call = peerRef.current.call(remotePeerId, stream);
+            setupMediaCall(call, remotePeerId);
           }
         });
       } catch (err) {
         console.error('Microphone access denied:', err);
-        setErrorMessage('Microphone access failed. Please allow microphone permissions.');
+        setErrorMessage('Microphone access failed. Please enable permissions.');
       }
     } else {
       if (localStreamRef.current) {
@@ -139,6 +148,8 @@ export default function App() {
       if (!audioEl) {
         audioEl = document.createElement('audio');
         audioEl.autoplay = true;
+        audioEl.playsInline = true;
+        document.body.appendChild(audioEl);
         audioElementsRef.current[remotePeerId] = audioEl;
       }
       audioEl.srcObject = remoteStream;
@@ -151,6 +162,10 @@ export default function App() {
         audioElementsRef.current[remotePeerId].remove();
         delete audioElementsRef.current[remotePeerId];
       }
+    });
+
+    call.on('error', (err) => {
+      console.error('Media call error:', err);
     });
   };
 
@@ -234,7 +249,7 @@ export default function App() {
       debug: 1
     });
 
-    peer.on('open', (id) => {
+    peer.on('open', () => {
       const initialHostPlayer = {
         id: hostId,
         name: playerName.trim() || 'Host',
@@ -328,7 +343,7 @@ export default function App() {
 
       conn.on('open', () => {
         connectionsRef.current[hostPeerId] = conn;
-        setConnStatus('Connected! Requesting to join seat...');
+        setConnStatus('Connected! Syncing seat...');
 
         conn.send({
           type: 'JOIN_REQUEST',
@@ -349,7 +364,7 @@ export default function App() {
         setGameStatus('waiting');
       });
 
-      conn.on('error', (err) => {
+      conn.on('error', () => {
         setErrorMessage('Failed to connect to host. Check room code.');
       });
     });
@@ -413,6 +428,7 @@ export default function App() {
     }
   };
 
+  // Centralized Host Action Handler
   const handleActionMessage = (actionData) => {
     if (!isHostRef.current) return;
 
@@ -480,6 +496,32 @@ export default function App() {
     }
     return next;
   };
+
+  // Host Bot Turn Controller: Listens for turn updates and triggers bot choices seamlessly
+  useEffect(() => {
+    if (!isHost || gameStatus !== 'playing') return;
+
+    const currentPlayer = players[currentTurn];
+    if (currentPlayer && currentPlayer.isBot && !currentPlayer.folded) {
+      const botTimer = setTimeout(() => {
+        const rand = Math.random();
+        if (rand < 0.15 && turnCount > 2) {
+          handleActionMessage({
+            type: 'ACTION_PACK',
+            payload: { playerId: currentPlayer.id }
+          });
+        } else {
+          const amount = currentPlayer.isBlind ? currentStake : currentStake * 2;
+          handleActionMessage({
+            type: 'ACTION_CHAAL',
+            payload: { playerId: currentPlayer.id, amount }
+          });
+        }
+      }, 1200);
+
+      return () => clearTimeout(botTimer);
+    }
+  }, [currentTurn, gameStatus, isHost, players, currentStake, turnCount]);
 
   const startGame = () => {
     let currentPlayers = [...players];
@@ -564,7 +606,6 @@ export default function App() {
     handleWinnerHost(bestPlayer, updatedPlayers, finalPot);
   };
 
-  // Handle Player Action Triggers
   const onChaalClick = (player) => {
     const amount = player.isBlind ? currentStake : currentStake * 2;
     sendActionToHostOrPeers({
@@ -606,7 +647,7 @@ export default function App() {
             <h1 className="font-extrabold text-lg tracking-tight bg-gradient-to-r from-emerald-400 to-teal-300 bg-clip-text text-transparent">
               PRIVATE TEEN PATTI
             </h1>
-            <p className="text-xs text-slate-400 font-medium">Real-time WebRTC Voice Chat & P2P Sync</p>
+            <p className="text-xs text-slate-400 font-medium">Real-time WebRTC Voice & Synced P2P</p>
           </div>
         </div>
 
@@ -795,6 +836,7 @@ export default function App() {
                       style={{ left: `${x}%`, top: `${y}%` }}
                       className="absolute -translate-x-1/2 -translate-y-1/2 pointer-events-auto flex flex-col items-center"
                     >
+                      {/* Player Badge with Explicit BLIND / SEEN / FOLDED Badges */}
                       <div className={`relative flex items-center gap-2 px-3 py-1.5 rounded-xl border transition-all backdrop-blur ${
                         isCurrentTurn 
                           ? 'bg-emerald-950/90 border-emerald-400 shadow-[0_0_15px_rgba(52,211,153,0.4)] scale-105' 
@@ -812,8 +854,28 @@ export default function App() {
                           </span>
                           <span className="text-[10px] font-mono text-emerald-400">${player.chips}</span>
                         </div>
+
+                        {/* Visible Status Indicators across all player screens */}
+                        {gameStatus === 'playing' && (
+                          <div className="ml-1 flex items-center">
+                            {player.folded ? (
+                              <span className="text-[9px] font-bold bg-rose-500/20 border border-rose-500/40 text-rose-400 px-1.5 py-0.5 rounded">
+                                FOLDED
+                              </span>
+                            ) : player.isBlind ? (
+                              <span className="text-[9px] font-bold bg-amber-500/20 border border-amber-500/40 text-amber-300 px-1.5 py-0.5 rounded">
+                                BLIND
+                              </span>
+                            ) : (
+                              <span className="text-[9px] font-bold bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 px-1.5 py-0.5 rounded">
+                                SEEN
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </div>
 
+                      {/* Cards Container */}
                       {gameStatus === 'playing' && player.cards && player.cards.length > 0 && (
                         <div className="flex gap-1 mt-2">
                           {player.cards.map((card, cIdx) => (
@@ -838,6 +900,7 @@ export default function App() {
                         </div>
                       )}
 
+                      {/* Dynamic Control Panel directly under user seat */}
                       {isUser && gameStatus === 'playing' && isCurrentTurn && (
                         <div className="mt-3 flex items-center gap-2 bg-slate-950/95 border border-emerald-500/40 p-2 rounded-2xl shadow-2xl backdrop-blur">
                           {player.isBlind && (
