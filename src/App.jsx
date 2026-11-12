@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import Peer from 'peerjs';
 import { 
   Users, Volume2, VolumeX, Mic, MicOff, 
-  Eye, RefreshCw, Trophy, Crown, ArrowRight, Copy, Check, LogOut, AlertCircle
+  Eye, RefreshCw, Trophy, Crown, ArrowRight, Copy, Check, LogOut, AlertCircle, RotateCcw
 } from 'lucide-react';
 
 const HAND_RANKS = {
@@ -50,7 +50,7 @@ export default function App() {
   const [inLobby, setInLobby] = useState(true);
   const [roomCode, setRoomCode] = useState('');
   const [bootAmount, setBootAmount] = useState(100);
-  const [maxSeats, setMaxSeats] = useState(3); // Default to 3 players
+  const [maxSeats, setMaxSeats] = useState(3);
   const [playerName, setPlayerName] = useState('Player 1');
   const [isHost, setIsHost] = useState(false);
   const [myPlayerId, setMyPlayerId] = useState('');
@@ -61,7 +61,8 @@ export default function App() {
   const [currentTurn, setCurrentTurn] = useState(0);
   const [pot, setPot] = useState(0);
   const [currentStake, setCurrentStake] = useState(100);
-  const [selectedBetBase, setSelectedBetBase] = useState(100);
+  // customStake is null when no custom stake option is chosen; otherwise holds exact chosen value (100, 200, 500, 1000)
+  const [customStake, setCustomStake] = useState(null);
   const [gameStatus, setGameStatus] = useState('waiting');
   const [turnCount, setTurnCount] = useState(0);
   const [roundResult, setRoundResult] = useState(null);
@@ -103,9 +104,10 @@ export default function App() {
   useEffect(() => { myPlayerIdRef.current = myPlayerId; }, [myPlayerId]);
   useEffect(() => { audioMutedRef.current = audioMuted; }, [audioMuted]);
 
+  // Reset customStake whenever the active turn changes so players start each turn with default stake unless they explicitly choose a custom value
   useEffect(() => {
-    setSelectedBetBase(currentStake);
-  }, [currentStake]);
+    setCustomStake(null);
+  }, [currentTurn, gameStatus]);
 
   const cleanupAudioAndPeers = () => {
     if (localStreamRef.current) {
@@ -134,7 +136,7 @@ export default function App() {
     return () => cleanupAudioAndPeers();
   }, []);
 
-  // Full-Mesh Voice Mesh Synchronization: ensures EVERY human peer has an active audio stream link to EVERY other human peer
+  // Full-Mesh Voice Mesh Synchronization
   useEffect(() => {
     if (!peerRef.current || !localStreamRef.current || inLobby) return;
 
@@ -168,7 +170,6 @@ export default function App() {
         localStreamRef.current = stream;
         setMicMuted(false);
 
-        // Call ALL human players in the room (not just the host!)
         const humanPeers = playersRef.current
           .filter(p => !p.isBot && p.id !== myPlayerIdRef.current)
           .map(p => p.id);
@@ -358,7 +359,6 @@ export default function App() {
     });
 
     peer.on('call', (call) => {
-      // Answer incoming call with localStream (if active) or blank stream so two-way audio works seamlessly
       call.answer(localStreamRef.current || undefined);
       setupMediaCall(call, call.peer);
     });
@@ -468,7 +468,6 @@ export default function App() {
       });
     });
 
-    // Answer incoming calls from BOTH Host and other Guests!
     peer.on('call', (call) => {
       call.answer(localStreamRef.current || undefined);
       setupMediaCall(call, call.peer);
@@ -507,7 +506,6 @@ export default function App() {
       const { id, sessionId, name } = data.payload;
 
       setPlayers(prev => {
-        // Deduplicate: Remove any stale entry with the same peer ID, sessionId, or matching name
         const filtered = prev.filter(p => {
           if (p.id === id) return false;
           if (sessionId && p.sessionId === sessionId) {
@@ -588,7 +586,7 @@ export default function App() {
     let newSideShowModal = sideShowModalRef.current;
 
     if (actionData.type === 'ACTION_CHAAL') {
-      const { playerId, baseStake, totalBet } = actionData.payload;
+      const { playerId, totalBet, isCustom } = actionData.payload;
       const actingPlayer = updatedPlayers.find(p => p.id === playerId);
       
       // Guard against negative balances or insufficient funds
@@ -596,8 +594,11 @@ export default function App() {
 
       updatedPlayers = updatedPlayers.map(p => p.id === playerId ? { ...p, chips: p.chips - totalBet } : p);
       newPot += totalBet;
-      if (baseStake && baseStake > newStake) {
-        newStake = baseStake;
+
+      // Update table base stake only when not overridden by a custom flat bet, or keep base stake synced appropriately
+      if (!isCustom) {
+        const impliedBase = actingPlayer.isBlind ? totalBet : Math.floor(totalBet / 2);
+        if (impliedBase > newStake) newStake = impliedBase;
       }
 
       const active = updatedPlayers.filter(p => !p.folded);
@@ -704,7 +705,7 @@ export default function App() {
     return next;
   };
 
-  // Bot Turn Automation Engine with insufficient chip check
+  // Bot Turn Automation Engine
   useEffect(() => {
     if (!isHost || gameStatus !== 'playing') return;
 
@@ -720,7 +721,7 @@ export default function App() {
         } else {
           handleActionMessage({
             type: 'ACTION_CHAAL',
-            payload: { playerId: currentPlayer.id, baseStake: currentStake, totalBet: requiredAmount }
+            payload: { playerId: currentPlayer.id, totalBet: requiredAmount, isCustom: false }
           });
         }
       }, 1200);
@@ -730,7 +731,6 @@ export default function App() {
   }, [currentTurn, gameStatus, isHost, players, currentStake, turnCount]);
 
   const startGame = () => {
-    // Keep only human players (remove old bots before refilling seats)
     let currentPlayers = players.filter(p => !p.isBot);
     const neededBots = Math.max(0, maxSeats - currentPlayers.length);
     
@@ -765,7 +765,7 @@ export default function App() {
     setPlayers(dealtPlayers);
     setPot(totalInitialPot);
     setCurrentStake(bootAmount);
-    setSelectedBetBase(bootAmount);
+    setCustomStake(null);
     setCurrentTurn(0);
     setTurnCount(1);
     setGameStatus('playing');
@@ -833,14 +833,29 @@ export default function App() {
     handleWinnerHost(bestPlayer, updatedPlayers, finalPot);
   };
 
+  /**
+   * Bet Calculation Logic:
+   * - If a custom stake option IS chosen (customStake !== null): use that exact custom value as-is (do NOT double when cards are seen).
+   * - If NO custom stake option is chosen (customStake === null): double the table stake if cards are seen (currentStake * 2), or 1x if blind (currentStake).
+   */
+  const calculatePlayerBet = (player) => {
+    if (customStake !== null) {
+      return customStake;
+    }
+    return player.isBlind ? currentStake : currentStake * 2;
+  };
+
   const onChaalClick = (player) => {
-    const base = Math.max(currentStake, selectedBetBase);
-    const totalBet = player.isBlind ? base : base * 2;
+    const totalBet = calculatePlayerBet(player);
     if (player.chips < totalBet) return;
 
     sendActionToHostOrPeers({
       type: 'ACTION_CHAAL',
-      payload: { playerId: player.id, baseStake: base, totalBet }
+      payload: { 
+        playerId: player.id, 
+        totalBet,
+        isCustom: customStake !== null
+      }
     });
   };
 
@@ -1046,7 +1061,7 @@ export default function App() {
 
                 {gameStatus === 'playing' && (
                   <div className="mt-2 text-xs font-mono text-slate-400 bg-slate-900/80 px-3 py-1 rounded-full border border-slate-800">
-                    Current Base Stake: <span className="text-emerald-400 font-bold">${currentStake}</span>
+                    Table Base Stake: <span className="text-emerald-400 font-bold">${currentStake}</span>
                   </div>
                 )}
 
@@ -1104,8 +1119,8 @@ export default function App() {
                   const isUser = player.id === myPlayerId;
                   const revealCard = (isUser && !player.isBlind) || gameStatus === 'ended';
 
-                  const activeStakeBase = Math.max(currentStake, selectedBetBase);
-                  const calculatedBetAmount = player.isBlind ? activeStakeBase : activeStakeBase * 2;
+                  // Exact bet calculation: Custom stake stays as-is (no doubling); default stake doubles when cards are seen
+                  const calculatedBetAmount = calculatePlayerBet(player);
                   const canAffordBet = player.chips >= calculatedBetAmount;
 
                   return (
@@ -1177,26 +1192,25 @@ export default function App() {
                         </div>
                       )}
 
-                      {/* On-Table Action Panel with Stake Selector (100, 200, 500, 1000) & Chip Balance Check */}
+                      {/* On-Table Action Panel with Exact Custom Stake Selector + Reset Option */}
                       {isUser && gameStatus === 'playing' && isCurrentTurn && (
                         <div className="mt-3 flex flex-col items-center gap-1.5 bg-slate-950/95 border border-emerald-500/40 p-2.5 rounded-2xl shadow-2xl backdrop-blur">
                           
-                          {/* Stake Selector Row */}
-                          <div className="flex items-center gap-1">
-                            <span className="text-[10px] font-semibold uppercase text-slate-400 mr-1">Stake:</span>
+                          {/* Custom Stake Selector Row with Reset */}
+                          <div className="flex items-center gap-1 flex-wrap justify-center">
+                            <span className="text-[10px] font-semibold uppercase text-slate-400 mr-1">Custom Stake:</span>
                             {STAKE_OPTIONS.map(stakeOpt => {
-                              const optBet = player.isBlind ? stakeOpt : stakeOpt * 2;
-                              const isDisabled = stakeOpt < currentStake || player.chips < optBet;
-                              const isSelected = activeStakeBase === stakeOpt;
+                              const isDisabled = player.chips < stakeOpt;
+                              const isSelected = customStake === stakeOpt;
 
                               return (
                                 <button
                                   key={stakeOpt}
                                   disabled={isDisabled}
-                                  onClick={() => setSelectedBetBase(stakeOpt)}
+                                  onClick={() => setCustomStake(isSelected ? null : stakeOpt)}
                                   className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition ${
                                     isSelected
-                                      ? 'bg-emerald-500 text-slate-950'
+                                      ? 'bg-emerald-500 text-slate-950 ring-1 ring-emerald-300'
                                       : isDisabled
                                       ? 'bg-slate-900 text-slate-600 cursor-not-allowed opacity-40'
                                       : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
@@ -1206,6 +1220,15 @@ export default function App() {
                                 </button>
                               );
                             })}
+                            {customStake !== null && (
+                              <button
+                                onClick={() => setCustomStake(null)}
+                                className="ml-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 flex items-center gap-1 transition"
+                                title="Reset custom stake selection"
+                              >
+                                <RotateCcw className="w-2.5 h-2.5" /> Reset
+                              </button>
+                            )}
                           </div>
 
                           {/* Action Buttons Row */}
