@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Peer from 'peerjs';
 import { 
-  Users, Shield, Zap, Play, Volume2, VolumeX, Mic, MicOff, 
+  Users, Volume2, VolumeX, Mic, MicOff, 
   Eye, RefreshCw, Trophy, Crown, ArrowRight, Copy, Check, LogOut, AlertCircle
 } from 'lucide-react';
 
@@ -27,6 +27,7 @@ const SUITS = [
 ];
 
 const BOT_NAMES = ['Aarav', 'Vihaan', 'Ananya', 'Diya', 'Kabir', 'Rohan'];
+const STAKE_OPTIONS = [100, 200, 500, 1000];
 
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
@@ -48,8 +49,8 @@ const ICE_SERVERS = [
 export default function App() {
   const [inLobby, setInLobby] = useState(true);
   const [roomCode, setRoomCode] = useState('');
-  const [bootAmount, setBootAmount] = useState(50);
-  const [maxSeats, setMaxSeats] = useState(4);
+  const [bootAmount, setBootAmount] = useState(100);
+  const [maxSeats, setMaxSeats] = useState(3); // Default to 3 players
   const [playerName, setPlayerName] = useState('Player 1');
   const [isHost, setIsHost] = useState(false);
   const [myPlayerId, setMyPlayerId] = useState('');
@@ -59,14 +60,15 @@ export default function App() {
   const [players, setPlayers] = useState([]);
   const [currentTurn, setCurrentTurn] = useState(0);
   const [pot, setPot] = useState(0);
-  const [currentStake, setCurrentStake] = useState(50);
+  const [currentStake, setCurrentStake] = useState(100);
+  const [selectedBetBase, setSelectedBetBase] = useState(100);
   const [gameStatus, setGameStatus] = useState('waiting');
   const [turnCount, setTurnCount] = useState(0);
   const [roundResult, setRoundResult] = useState(null);
   const [sideShowModal, setSideShowModal] = useState(null);
   const [copied, setCopied] = useState(false);
 
-  // Voice Chat States & Refs
+  // Full-Mesh Voice Chat States & Refs
   const [micMuted, setMicMuted] = useState(true);
   const [audioMuted, setAudioMuted] = useState(false);
   const localStreamRef = useRef(null);
@@ -76,7 +78,7 @@ export default function App() {
   const peerRef = useRef(null);
   const connectionsRef = useRef({});
 
-  // Real-time Master Refs to prevent stale closures
+  // Real-time Master Refs
   const playersRef = useRef(players);
   const isHostRef = useRef(isHost);
   const currentTurnRef = useRef(currentTurn);
@@ -86,6 +88,8 @@ export default function App() {
   const gameStatusRef = useRef(gameStatus);
   const sideShowModalRef = useRef(sideShowModal);
   const roundResultRef = useRef(roundResult);
+  const myPlayerIdRef = useRef(myPlayerId);
+  const audioMutedRef = useRef(audioMuted);
 
   useEffect(() => { playersRef.current = players; }, [players]);
   useEffect(() => { isHostRef.current = isHost; }, [isHost]);
@@ -96,17 +100,59 @@ export default function App() {
   useEffect(() => { gameStatusRef.current = gameStatus; }, [gameStatus]);
   useEffect(() => { sideShowModalRef.current = sideShowModal; }, [sideShowModal]);
   useEffect(() => { roundResultRef.current = roundResult; }, [roundResult]);
+  useEffect(() => { myPlayerIdRef.current = myPlayerId; }, [myPlayerId]);
+  useEffect(() => { audioMutedRef.current = audioMuted; }, [audioMuted]);
 
   useEffect(() => {
-    return () => {
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach(track => track.stop());
-      }
-      if (peerRef.current) {
-        peerRef.current.destroy();
-      }
-    };
+    setSelectedBetBase(currentStake);
+  }, [currentStake]);
+
+  const cleanupAudioAndPeers = () => {
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => track.stop());
+      localStreamRef.current = null;
+    }
+    Object.values(mediaCallsRef.current).forEach(call => {
+      try { call.close(); } catch (e) {}
+    });
+    mediaCallsRef.current = {};
+
+    Object.values(audioElementsRef.current).forEach(el => {
+      try { el.remove(); } catch (e) {}
+    });
+    audioElementsRef.current = {};
+
+    if (peerRef.current) {
+      try { peerRef.current.destroy(); } catch (e) {}
+      peerRef.current = null;
+    }
+    connectionsRef.current = {};
+    setMicMuted(true);
+  };
+
+  useEffect(() => {
+    return () => cleanupAudioAndPeers();
   }, []);
+
+  // Full-Mesh Voice Mesh Synchronization: ensures EVERY human peer has an active audio stream link to EVERY other human peer
+  useEffect(() => {
+    if (!peerRef.current || !localStreamRef.current || inLobby) return;
+
+    const humanPeers = players
+      .filter(p => !p.isBot && p.id !== myPlayerId)
+      .map(p => p.id);
+
+    humanPeers.forEach(remoteId => {
+      if (!mediaCallsRef.current[remoteId]) {
+        try {
+          const call = peerRef.current.call(remoteId, localStreamRef.current);
+          if (call) setupMediaCall(call, remoteId);
+        } catch (err) {
+          console.error('Error initiating mesh voice call to', remoteId, err);
+        }
+      }
+    });
+  }, [players, inLobby, myPlayerId]);
 
   const toggleMic = async () => {
     if (!localStreamRef.current) {
@@ -122,10 +168,18 @@ export default function App() {
         localStreamRef.current = stream;
         setMicMuted(false);
 
-        Object.keys(connectionsRef.current).forEach(remotePeerId => {
-          if (peerRef.current && !mediaCallsRef.current[remotePeerId]) {
+        // Call ALL human players in the room (not just the host!)
+        const humanPeers = playersRef.current
+          .filter(p => !p.isBot && p.id !== myPlayerIdRef.current)
+          .map(p => p.id);
+
+        humanPeers.forEach(remotePeerId => {
+          if (peerRef.current) {
+            if (mediaCallsRef.current[remotePeerId]) {
+              try { mediaCallsRef.current[remotePeerId].close(); } catch (e) {}
+            }
             const call = peerRef.current.call(remotePeerId, stream);
-            setupMediaCall(call, remotePeerId);
+            if (call) setupMediaCall(call, remotePeerId);
           }
         });
       } catch (err) {
@@ -155,7 +209,8 @@ export default function App() {
         audioElementsRef.current[remotePeerId] = audioEl;
       }
       audioEl.srcObject = remoteStream;
-      audioEl.muted = audioMuted;
+      audioEl.muted = audioMutedRef.current;
+      audioEl.play().catch(() => {});
     });
 
     call.on('close', () => {
@@ -178,7 +233,6 @@ export default function App() {
   const createShuffledDeck = () => {
     const values = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
     const deck = [];
-    
     values.forEach(val => {
       SUITS.forEach(suit => {
         deck.push({
@@ -189,12 +243,10 @@ export default function App() {
         });
       });
     });
-
     for (let i = deck.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [deck[i], deck[j]] = [deck[j], deck[i]];
     }
-
     return deck;
   };
 
@@ -202,11 +254,9 @@ export default function App() {
     if (!cards || cards.length < 3) return { rank: 0, name: 'Invalid', score: 0 };
     const sorted = [...cards].sort((a, b) => b.numVal - a.numVal);
     const isFlush = sorted[0].suit === sorted[1].suit && sorted[1].suit === sorted[2].suit;
-    
     const v0 = sorted[0].numVal, v1 = sorted[1].numVal, v2 = sorted[2].numVal;
     const is3OfAKind = v0 === v1 && v1 === v2;
     const isPair = v0 === v1 || v1 === v2 || v0 === v2;
-    
     let isStraight = false;
     if (v0 - v1 === 1 && v1 - v2 === 1) isStraight = true;
     if (v0 === 14 && v1 === 3 && v2 === 2) isStraight = true;
@@ -244,8 +294,19 @@ export default function App() {
 
   const sanitizeCode = (code) => code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 
+  const getStableSessionId = () => {
+    let sid = sessionStorage.getItem('tp_session_id');
+    if (!sid) {
+      sid = Math.random().toString(36).substring(2, 9);
+      sessionStorage.setItem('tp_session_id', sid);
+    }
+    return sid;
+  };
+
   const createRoom = () => {
     setErrorMessage('');
+    cleanupAudioAndPeers();
+
     const rawCode = Math.random().toString(36).substring(2, 8).toUpperCase();
     const formattedCode = sanitizeCode(rawCode);
     const hostId = 'patti_host_' + formattedCode;
@@ -255,8 +316,6 @@ export default function App() {
     setMyPlayerId(hostId);
     setConnStatus('Initializing peer room...');
 
-    if (peerRef.current) peerRef.current.destroy();
-
     const peer = new Peer(hostId, {
       config: { iceServers: ICE_SERVERS },
       debug: 1
@@ -265,6 +324,7 @@ export default function App() {
     peer.on('open', () => {
       const initialHostPlayer = {
         id: hostId,
+        sessionId: getStableSessionId(),
         name: playerName.trim() || 'Host',
         isHost: true,
         isBot: false,
@@ -289,27 +349,16 @@ export default function App() {
       });
 
       conn.on('close', () => {
-        delete connectionsRef.current[conn.peer];
-        setPlayers(prev => {
-          const updated = prev.filter(p => p.id !== conn.peer);
-          if (isHostRef.current) {
-            broadcastState({
-              players: updated,
-              pot: potRef.current,
-              currentTurn: currentTurnRef.current,
-              gameStatus: gameStatusRef.current,
-              currentStake: currentStakeRef.current,
-              turnCount: turnCountRef.current,
-              roundResult: roundResultRef.current,
-              sideShowModal: sideShowModalRef.current
-            });
-          }
-          return updated;
-        });
+        removeDisconnectedPeer(conn.peer);
+      });
+
+      conn.on('error', () => {
+        removeDisconnectedPeer(conn.peer);
       });
     });
 
     peer.on('call', (call) => {
+      // Answer incoming call with localStream (if active) or blank stream so two-way audio works seamlessly
       call.answer(localStreamRef.current || undefined);
       setupMediaCall(call, call.peer);
     });
@@ -326,6 +375,38 @@ export default function App() {
     peerRef.current = peer;
   };
 
+  const removeDisconnectedPeer = (peerId) => {
+    delete connectionsRef.current[peerId];
+    if (mediaCallsRef.current[peerId]) {
+      try { mediaCallsRef.current[peerId].close(); } catch (e) {}
+      delete mediaCallsRef.current[peerId];
+    }
+    if (audioElementsRef.current[peerId]) {
+      audioElementsRef.current[peerId].remove();
+      delete audioElementsRef.current[peerId];
+    }
+
+    setPlayers(prev => {
+      const updated = prev.filter(p => p.id !== peerId);
+      if (isHostRef.current) {
+        let nextTurn = currentTurnRef.current;
+        if (nextTurn >= updated.length) nextTurn = 0;
+
+        broadcastState({
+          players: updated,
+          pot: potRef.current,
+          currentTurn: nextTurn,
+          gameStatus: gameStatusRef.current,
+          currentStake: currentStakeRef.current,
+          turnCount: turnCountRef.current,
+          roundResult: roundResultRef.current,
+          sideShowModal: sideShowModalRef.current
+        });
+      }
+      return updated;
+    });
+  };
+
   const joinRoom = () => {
     setErrorMessage('');
     if (!roomCode) {
@@ -339,14 +420,15 @@ export default function App() {
       return;
     }
 
-    const guestId = 'patti_guest_' + Math.random().toString(36).substring(2, 8);
+    cleanupAudioAndPeers();
+
+    const sessionId = getStableSessionId();
+    const guestId = 'patti_guest_' + sessionId + '_' + Math.random().toString(36).substring(2, 5);
     const hostPeerId = 'patti_host_' + cleanCode;
 
     setMyPlayerId(guestId);
     setIsHost(false);
     setConnStatus('Connecting to room ' + cleanCode + '...');
-
-    if (peerRef.current) peerRef.current.destroy();
 
     const peer = new Peer(guestId, {
       config: { iceServers: ICE_SERVERS },
@@ -364,6 +446,7 @@ export default function App() {
           type: 'JOIN_REQUEST',
           payload: {
             id: guestId,
+            sessionId,
             name: playerName.trim() || 'Player ' + Math.floor(Math.random() * 100)
           }
         });
@@ -377,6 +460,7 @@ export default function App() {
         setErrorMessage('Disconnected from host.');
         setInLobby(true);
         setGameStatus('waiting');
+        cleanupAudioAndPeers();
       });
 
       conn.on('error', () => {
@@ -384,6 +468,7 @@ export default function App() {
       });
     });
 
+    // Answer incoming calls from BOTH Host and other Guests!
     peer.on('call', (call) => {
       call.answer(localStreamRef.current || undefined);
       setupMediaCall(call, call.peer);
@@ -397,24 +482,57 @@ export default function App() {
     peerRef.current = peer;
   };
 
+  const handleLeaveRoom = () => {
+    if (!isHostRef.current) {
+      const hostConn = Object.values(connectionsRef.current)[0];
+      if (hostConn && hostConn.open) {
+        try {
+          hostConn.send({ type: 'LEAVE_ROOM', payload: { id: myPlayerIdRef.current } });
+        } catch (e) {}
+      }
+    }
+    cleanupAudioAndPeers();
+    setPlayers([]);
+    setInLobby(true);
+    setGameStatus('waiting');
+    setRoundResult(null);
+    setSideShowModal(null);
+    setConnStatus('');
+  };
+
   const handleIncomingData = (data, conn) => {
     if (!data || !data.type) return;
 
     if (data.type === 'JOIN_REQUEST' && isHostRef.current) {
-      const newPlayer = {
-        id: data.payload.id,
-        name: data.payload.name,
-        isHost: false,
-        isBot: false,
-        chips: 5000,
-        cards: [],
-        isBlind: true,
-        folded: false
-      };
+      const { id, sessionId, name } = data.payload;
 
       setPlayers(prev => {
-        const exists = prev.some(p => p.id === newPlayer.id);
-        const updated = exists ? prev : [...prev, newPlayer];
+        // Deduplicate: Remove any stale entry with the same peer ID, sessionId, or matching name
+        const filtered = prev.filter(p => {
+          if (p.id === id) return false;
+          if (sessionId && p.sessionId === sessionId) {
+            if (connectionsRef.current[p.id]) {
+              try { connectionsRef.current[p.id].close(); } catch (e) {}
+              delete connectionsRef.current[p.id];
+            }
+            return false;
+          }
+          return true;
+        });
+
+        const newPlayer = {
+          id,
+          sessionId,
+          name,
+          isHost: false,
+          isBot: false,
+          chips: 5000,
+          cards: [],
+          isBlind: true,
+          folded: false
+        };
+
+        const updated = [...filtered, newPlayer];
 
         const statePayload = {
           players: updated,
@@ -431,6 +549,8 @@ export default function App() {
         broadcastState(statePayload);
         return updated;
       });
+    } else if (data.type === 'LEAVE_ROOM' && isHostRef.current) {
+      removeDisconnectedPeer(data.payload.id);
     } else if (data.type === 'SYNC_STATE') {
       setPlayers(data.payload.players);
       setPot(data.payload.pot);
@@ -455,7 +575,6 @@ export default function App() {
     return prevIndex;
   };
 
-  // Centralized Host Action & Turn Handler (NO 12-turn limit)
   const handleActionMessage = (actionData) => {
     if (!isHostRef.current) return;
 
@@ -469,10 +588,18 @@ export default function App() {
     let newSideShowModal = sideShowModalRef.current;
 
     if (actionData.type === 'ACTION_CHAAL') {
-      const { playerId, amount } = actionData.payload;
-      updatedPlayers = updatedPlayers.map(p => p.id === playerId ? { ...p, chips: p.chips - amount } : p);
-      newPot += amount;
+      const { playerId, baseStake, totalBet } = actionData.payload;
+      const actingPlayer = updatedPlayers.find(p => p.id === playerId);
       
+      // Guard against negative balances or insufficient funds
+      if (!actingPlayer || actingPlayer.chips < totalBet) return;
+
+      updatedPlayers = updatedPlayers.map(p => p.id === playerId ? { ...p, chips: p.chips - totalBet } : p);
+      newPot += totalBet;
+      if (baseStake && baseStake > newStake) {
+        newStake = baseStake;
+      }
+
       const active = updatedPlayers.filter(p => !p.folded);
       if (active.length === 1) {
         handleWinnerHost(active[0], updatedPlayers, newPot);
@@ -577,24 +704,23 @@ export default function App() {
     return next;
   };
 
-  // Bot Turn Automation Engine
+  // Bot Turn Automation Engine with insufficient chip check
   useEffect(() => {
     if (!isHost || gameStatus !== 'playing') return;
 
     const currentPlayer = players[currentTurn];
     if (currentPlayer && currentPlayer.isBot && !currentPlayer.folded) {
       const botTimer = setTimeout(() => {
-        const rand = Math.random();
-        if (rand < 0.15 && turnCount > 2) {
+        const requiredAmount = currentPlayer.isBlind ? currentStake : currentStake * 2;
+        if (currentPlayer.chips < requiredAmount || (Math.random() < 0.15 && turnCount > 2)) {
           handleActionMessage({
             type: 'ACTION_PACK',
             payload: { playerId: currentPlayer.id }
           });
         } else {
-          const amount = currentPlayer.isBlind ? currentStake : currentStake * 2;
           handleActionMessage({
             type: 'ACTION_CHAAL',
-            payload: { playerId: currentPlayer.id, amount }
+            payload: { playerId: currentPlayer.id, baseStake: currentStake, totalBet: requiredAmount }
           });
         }
       }, 1200);
@@ -604,12 +730,13 @@ export default function App() {
   }, [currentTurn, gameStatus, isHost, players, currentStake, turnCount]);
 
   const startGame = () => {
-    let currentPlayers = [...players];
-    const neededBots = maxSeats - currentPlayers.length;
+    // Keep only human players (remove old bots before refilling seats)
+    let currentPlayers = players.filter(p => !p.isBot);
+    const neededBots = Math.max(0, maxSeats - currentPlayers.length);
     
     for (let i = 0; i < neededBots; i++) {
       currentPlayers.push({
-        id: `bot_${i}`,
+        id: `bot_${i}_${Date.now()}`,
         name: `${BOT_NAMES[i % BOT_NAMES.length]} (Bot)`,
         isHost: false,
         isBot: true,
@@ -621,19 +748,24 @@ export default function App() {
     }
 
     const deck = createShuffledDeck();
+    let totalInitialPot = 0;
 
-    const dealtPlayers = currentPlayers.map(p => ({
-      ...p,
-      cards: [deck.pop(), deck.pop(), deck.pop()],
-      isBlind: true,
-      folded: false,
-      chips: p.chips - bootAmount
-    }));
+    const dealtPlayers = currentPlayers.map(p => {
+      const resetChips = p.chips < bootAmount ? 5000 : p.chips;
+      totalInitialPot += bootAmount;
+      return {
+        ...p,
+        cards: [deck.pop(), deck.pop(), deck.pop()],
+        isBlind: true,
+        folded: false,
+        chips: resetChips - bootAmount
+      };
+    });
 
-    const initialPot = bootAmount * dealtPlayers.length;
     setPlayers(dealtPlayers);
-    setPot(initialPot);
+    setPot(totalInitialPot);
     setCurrentStake(bootAmount);
+    setSelectedBetBase(bootAmount);
     setCurrentTurn(0);
     setTurnCount(1);
     setGameStatus('playing');
@@ -643,7 +775,7 @@ export default function App() {
     if (isHost) {
       broadcastState({
         players: dealtPlayers,
-        pot: initialPot,
+        pot: totalInitialPot,
         currentTurn: 0,
         gameStatus: 'playing',
         currentStake: bootAmount,
@@ -654,11 +786,8 @@ export default function App() {
     }
   };
 
-  // On-Table Winner Handler: Reveals all active cards & sets on-table result banner
   const handleWinnerHost = (winner, updatedPlayers, finalPot) => {
     const winningEval = evaluateHand(winner.cards);
-    
-    // Reveal all cards for all players on game end
     const finalPlayers = updatedPlayers.map(p => ({
       ...p,
       isBlind: false,
@@ -705,10 +834,13 @@ export default function App() {
   };
 
   const onChaalClick = (player) => {
-    const amount = player.isBlind ? currentStake : currentStake * 2;
+    const base = Math.max(currentStake, selectedBetBase);
+    const totalBet = player.isBlind ? base : base * 2;
+    if (player.chips < totalBet) return;
+
     sendActionToHostOrPeers({
       type: 'ACTION_CHAAL',
-      payload: { playerId: player.id, amount }
+      payload: { playerId: player.id, baseStake: base, totalBet }
     });
   };
 
@@ -768,7 +900,7 @@ export default function App() {
             <h1 className="font-extrabold text-lg tracking-tight bg-gradient-to-r from-emerald-400 to-teal-300 bg-clip-text text-transparent">
               PRIVATE TEEN PATTI
             </h1>
-            <p className="text-xs text-slate-400 font-medium">Real-time WebRTC Voice & Synced P2P</p>
+            <p className="text-xs text-slate-400 font-medium">Mesh WebRTC Voice & Synced P2P</p>
           </div>
         </div>
 
@@ -797,10 +929,7 @@ export default function App() {
                 {audioMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
               </button>
               <button 
-                onClick={() => {
-                  setInLobby(true);
-                  if (peerRef.current) peerRef.current.destroy();
-                }} 
+                onClick={handleLeaveRoom} 
                 className="p-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-400 hover:bg-rose-500/20 transition"
                 title="Leave Room"
               >
@@ -815,7 +944,7 @@ export default function App() {
         {inLobby ? (
           <div className="w-full max-w-md bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-2xl backdrop-blur">
             <h2 className="text-xl font-bold text-slate-100 mb-1">Join or Create Private Table</h2>
-            <p className="text-xs text-slate-400 mb-4">Play real-time WebRTC 3-card Poker with live Voice Chat</p>
+            <p className="text-xs text-slate-400 mb-4">Play real-time WebRTC 3-card Poker with Mesh Voice Chat</p>
 
             {errorMessage && (
               <div className="mb-4 p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-rose-300 text-xs flex items-center gap-2">
@@ -850,9 +979,10 @@ export default function App() {
                     onChange={e => setBootAmount(Number(e.target.value))}
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-100 focus:outline-none focus:border-emerald-500 transition"
                   >
-                    <option value={50}>$50</option>
                     <option value={100}>$100</option>
+                    <option value={200}>$200</option>
                     <option value={500}>$500</option>
+                    <option value={1000}>$1000</option>
                   </select>
                 </div>
                 <div>
@@ -904,7 +1034,7 @@ export default function App() {
           </div>
         ) : (
           <div className="w-full max-w-5xl flex flex-col items-center">
-            <div className="w-full aspect-[16/9] max-h-[580px] bg-slate-900 border-[12px] border-emerald-900/60 rounded-[120px] relative shadow-[0_0_80px_rgba(16,185,129,0.15)] flex flex-col items-center justify-center p-6 border-emerald-950">
+            <div className="w-full aspect-[16/9] max-h-[600px] bg-slate-900 border-[12px] border-emerald-900/60 rounded-[120px] relative shadow-[0_0_80px_rgba(16,185,129,0.15)] flex flex-col items-center justify-center p-6 border-emerald-950">
               <div className="absolute inset-4 rounded-[100px] border border-emerald-500/20 bg-gradient-to-b from-emerald-950/40 to-slate-950/80 pointer-events-none" />
 
               {/* Central Table Header & On-Table Result Display */}
@@ -916,13 +1046,12 @@ export default function App() {
 
                 {gameStatus === 'playing' && (
                   <div className="mt-2 text-xs font-mono text-slate-400 bg-slate-900/80 px-3 py-1 rounded-full border border-slate-800">
-                    Stake: <span className="text-emerald-400 font-bold">${currentStake}</span>
+                    Current Base Stake: <span className="text-emerald-400 font-bold">${currentStake}</span>
                   </div>
                 )}
 
-                {/* On-Table Winner Result Banner */}
                 {gameStatus === 'ended' && roundResult && (
-                  <div className="mt-3 bg-slate-950/95 border border-emerald-500/50 p-4 rounded-2xl shadow-2xl backdrop-blur max-w-md flex flex-col items-center gap-1.5 animate-fade-in">
+                  <div className="mt-3 bg-slate-950/95 border border-emerald-500/50 p-4 rounded-2xl shadow-2xl backdrop-blur max-w-md flex flex-col items-center gap-1.5">
                     <Trophy className="w-7 h-7 text-amber-400 animate-bounce" />
                     <h3 className="font-extrabold text-xl text-slate-100 tracking-tight">
                       {roundResult.winner.name} Wins ${roundResult.amount}!
@@ -975,6 +1104,10 @@ export default function App() {
                   const isUser = player.id === myPlayerId;
                   const revealCard = (isUser && !player.isBlind) || gameStatus === 'ended';
 
+                  const activeStakeBase = Math.max(currentStake, selectedBetBase);
+                  const calculatedBetAmount = player.isBlind ? activeStakeBase : activeStakeBase * 2;
+                  const canAffordBet = player.chips >= calculatedBetAmount;
+
                   return (
                     <div 
                       key={player.id} 
@@ -1018,7 +1151,6 @@ export default function App() {
                         )}
                       </div>
 
-                      {/* Cards Display with full reveal on game ending */}
                       {(gameStatus === 'playing' || gameStatus === 'ended') && player.cards && player.cards.length > 0 && (
                         <div className="flex gap-1 mt-2">
                           {player.cards.map((card, cIdx) => (
@@ -1045,45 +1177,81 @@ export default function App() {
                         </div>
                       )}
 
-                      {/* On-Table Action Panel */}
+                      {/* On-Table Action Panel with Stake Selector (100, 200, 500, 1000) & Chip Balance Check */}
                       {isUser && gameStatus === 'playing' && isCurrentTurn && (
-                        <div className="mt-3 flex items-center gap-2 bg-slate-950/95 border border-emerald-500/40 p-2 rounded-2xl shadow-2xl backdrop-blur">
-                          {player.isBlind && (
+                        <div className="mt-3 flex flex-col items-center gap-1.5 bg-slate-950/95 border border-emerald-500/40 p-2.5 rounded-2xl shadow-2xl backdrop-blur">
+                          
+                          {/* Stake Selector Row */}
+                          <div className="flex items-center gap-1">
+                            <span className="text-[10px] font-semibold uppercase text-slate-400 mr-1">Stake:</span>
+                            {STAKE_OPTIONS.map(stakeOpt => {
+                              const optBet = player.isBlind ? stakeOpt : stakeOpt * 2;
+                              const isDisabled = stakeOpt < currentStake || player.chips < optBet;
+                              const isSelected = activeStakeBase === stakeOpt;
+
+                              return (
+                                <button
+                                  key={stakeOpt}
+                                  disabled={isDisabled}
+                                  onClick={() => setSelectedBetBase(stakeOpt)}
+                                  className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition ${
+                                    isSelected
+                                      ? 'bg-emerald-500 text-slate-950'
+                                      : isDisabled
+                                      ? 'bg-slate-900 text-slate-600 cursor-not-allowed opacity-40'
+                                      : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                                  }`}
+                                >
+                                  ${stakeOpt}
+                                </button>
+                              );
+                            })}
+                          </div>
+
+                          {/* Action Buttons Row */}
+                          <div className="flex items-center gap-2">
+                            {player.isBlind && (
+                              <button 
+                                onClick={() => onSeeCardsClick(player)} 
+                                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-xs font-bold text-slate-200 flex items-center gap-1"
+                              >
+                                <Eye className="w-3 h-3 text-emerald-400" /> See Cards
+                              </button>
+                            )}
                             <button 
-                              onClick={() => onSeeCardsClick(player)} 
-                              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-xs font-bold text-slate-200 flex items-center gap-1"
+                              onClick={() => onPackClick(player)} 
+                              className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 rounded-xl text-xs font-bold text-rose-300"
                             >
-                              <Eye className="w-3 h-3 text-emerald-400" /> See Cards
+                              Pack
                             </button>
-                          )}
-                          <button 
-                            onClick={() => onPackClick(player)} 
-                            className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 rounded-xl text-xs font-bold text-rose-300"
-                          >
-                            Pack
-                          </button>
-                          <button 
-                            onClick={() => onChaalClick(player)} 
-                            className="px-4 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 rounded-xl text-xs font-extrabold shadow-md shadow-emerald-500/20"
-                          >
-                            Chaal (${player.isBlind ? currentStake : currentStake * 2})
-                          </button>
-                          {activePlayers.length >= 3 && !player.isBlind && (
                             <button 
-                              onClick={() => onSideShowClick(player)}
-                              className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 rounded-xl text-xs font-bold text-amber-300 transition"
+                              disabled={!canAffordBet}
+                              onClick={() => onChaalClick(player)} 
+                              className={`px-4 py-1.5 rounded-xl text-xs font-extrabold transition shadow-md ${
+                                canAffordBet
+                                  ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-emerald-500/20'
+                                  : 'bg-slate-800 text-slate-500 cursor-not-allowed opacity-50'
+                              }`}
                             >
-                              Side Show
+                              {canAffordBet ? `Chaal ($${calculatedBetAmount})` : 'Low Chips'}
                             </button>
-                          )}
-                          {activePlayers.length === 2 && (
-                            <button 
-                              onClick={onShowCardsClick} 
-                              className="px-3 py-1.5 bg-teal-500 hover:bg-teal-400 text-slate-950 rounded-xl text-xs font-extrabold transition"
-                            >
-                              Show
-                            </button>
-                          )}
+                            {activePlayers.length >= 3 && !player.isBlind && (
+                              <button 
+                                onClick={() => onSideShowClick(player)}
+                                className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 rounded-xl text-xs font-bold text-amber-300 transition"
+                              >
+                                Side Show
+                              </button>
+                            )}
+                            {activePlayers.length === 2 && (
+                              <button 
+                                onClick={onShowCardsClick} 
+                                className="px-3 py-1.5 bg-teal-500 hover:bg-teal-400 text-slate-950 rounded-xl text-xs font-extrabold transition"
+                              >
+                                Show
+                              </button>
+                            )}
+                          </div>
                         </div>
                       )}
                     </div>
