@@ -61,8 +61,9 @@ export default function App() {
   const [currentTurn, setCurrentTurn] = useState(0);
   const [pot, setPot] = useState(0);
   const [currentStake, setCurrentStake] = useState(100);
-  // Tracks the max stake contribution/bet of the current betting round for Blind vs Seen relative rules
   const [maxStakeAmount, setMaxStakeAmount] = useState(100);
+  // Custom Stake Option (null if using standard relative rule, otherwise holds exact chosen stake)
+  const [customStake, setCustomStake] = useState(null);
   const [gameStatus, setGameStatus] = useState('waiting');
   const [turnCount, setTurnCount] = useState(0);
   const [roundResult, setRoundResult] = useState(null);
@@ -106,7 +107,11 @@ export default function App() {
   useEffect(() => { myPlayerIdRef.current = myPlayerId; }, [myPlayerId]);
   useEffect(() => { audioMutedRef.current = audioMuted; }, [audioMuted]);
 
-  // Persistent Session & Auto-reconnection state management
+  // Reset custom stake on turn change
+  useEffect(() => {
+    setCustomStake(null);
+  }, [currentTurn, gameStatus]);
+
   const getSessionStorageItem = (key, fallback) => {
     try {
       const val = sessionStorage.getItem(key);
@@ -142,7 +147,6 @@ export default function App() {
     setSessionStorageItem('tp_player_chips_registry', registry);
   };
 
-  // Auto-reconnect check on mount if previously in an active room
   useEffect(() => {
     const savedRoom = getSessionStorageItem('tp_active_room', null);
     const savedName = getSessionStorageItem('tp_player_name', 'Player 1');
@@ -156,16 +160,13 @@ export default function App() {
       setMyPlayerId(savedMyId);
 
       if (savedIsHost) {
-        // Re-initialize Host Peer
         initHostPeer(savedRoom, savedMyId, savedName);
       } else {
-        // Re-initialize Guest Peer & Auto Reconnect
         initGuestPeer(savedRoom, savedMyId, savedName);
       }
     }
   }, []);
 
-  // Update session storage whenever room state changes
   useEffect(() => {
     if (!inLobby && roomCode) {
       setSessionStorageItem('tp_active_room', roomCode);
@@ -202,7 +203,6 @@ export default function App() {
     return () => cleanupAudioAndPeers();
   }, []);
 
-  // Voice Mesh Synchronization
   useEffect(() => {
     if (!peerRef.current || !localStreamRef.current || inLobby) return;
 
@@ -392,11 +392,7 @@ export default function App() {
         handleIncomingData(data, conn);
       });
 
-      conn.on('close', () => {
-        // Do not immediately remove human player on brief disconnect to support reload persistence; 
-        // rely on explicit LEAVE or timeout if needed.
-      });
-
+      conn.on('close', () => {});
       conn.on('error', () => {});
     });
 
@@ -542,12 +538,10 @@ export default function App() {
       const { id, sessionId, name, chips } = data.payload;
 
       setPlayers(prev => {
-        // Count current human players (excluding bots)
         const currentHumans = prev.filter(p => !p.isBot);
         const existingPlayer = prev.find(p => p.id === id || (sessionId && p.sessionId === sessionId));
 
         if (!existingPlayer && currentHumans.length >= maxSeats) {
-          // Room Full alert for human capacity check (ignoring bots)
           try {
             conn.send({ type: 'ROOM_FULL', payload: { message: 'Room is full! Maximum human player capacity reached.' } });
           } catch (e) {}
@@ -611,7 +605,6 @@ export default function App() {
       setInLobby(false);
       setConnStatus('Connected');
 
-      // Update local chip registry persistence
       data.payload.players.forEach(p => {
         if (p.id === myPlayerIdRef.current || p.sessionId === getSessionStorageItem('tp_session_id', '')) {
           savePlayerChipsRegistry(p.sessionId || getStableSessionId(), p.chips);
@@ -664,23 +657,29 @@ export default function App() {
   };
 
   /**
-   * Precise Teen Patti Stake Matching & Relative Rules:
-   * 1. If player has not seen card and max-stake player has not seen: match max stake (1x).
-   * 2. If player has seen card and max-stake player has NOT seen: player must double the stake (maxStakeAmount * 2).
-   * 3. If max-stake player has seen card and the player is blind: the stake would be half (Math.floor(maxStakeAmount / 2), min 1).
-   * 4. If both have seen: match max stake (1x).
+   * Stake Calculation combining Custom Stake option + Relative Blind/Seen rules:
+   * 1. If user explicitly chooses a custom stake option (`customStake !== null`), use that exact value.
+   * 2. Otherwise, use relative Blind vs Seen rules based on reference max-stake player (`maxStakeAmount`):
+   *    - Blind vs Blind: 1x (maxStakeAmount)
+   *    - Seen vs Blind: 2x (maxStakeAmount * 2)
+   *    - Blind vs Seen: 0.5x (Math.floor(maxStakeAmount / 2))
+   *    - Seen vs Seen: 1x (maxStakeAmount)
    */
   const getRequiredBetForPlayer = (player, refMaxStake, maxStakePlayerIsBlind) => {
+    if (customStake !== null) {
+      return customStake;
+    }
+
     const isPlayerBlind = player.isBlind;
 
     if (isPlayerBlind && maxStakePlayerIsBlind) {
-      return refMaxStake; // 1x
+      return refMaxStake;
     } else if (!isPlayerBlind && maxStakePlayerIsBlind) {
-      return refMaxStake * 2; // Double the stake
+      return refMaxStake * 2;
     } else if (isPlayerBlind && !maxStakePlayerIsBlind) {
-      return Math.max(1, Math.floor(refMaxStake / 2)); // Half stake
+      return Math.max(1, Math.floor(refMaxStake / 2));
     } else {
-      return refMaxStake; // Both seen -> 1x
+      return refMaxStake;
     }
   };
 
@@ -719,7 +718,6 @@ export default function App() {
       newMaxStakeAmount = totalBet;
       newStake = totalBet;
 
-      // Save registry
       savePlayerChipsRegistry(actingPlayer.sessionId || actingPlayer.id, actingPlayer.chips - totalBet);
 
       const active = updatedPlayers.filter(p => !p.folded && !p.isSpectator);
@@ -908,6 +906,7 @@ export default function App() {
     setPot(totalInitialPot);
     setCurrentStake(bootAmount);
     setMaxStakeAmount(bootAmount);
+    setCustomStake(null);
     setCurrentTurn(0);
     setTurnCount(1);
     setGameStatus('playing');
@@ -1334,7 +1333,7 @@ export default function App() {
                         </div>
                       )}
 
-                      {/* On-Table Action Panel with Spectator & Stake Logic */}
+                      {/* On-Table Action Panel with Custom Stake Selector & Reset */}
                       {isUser && gameStatus === 'playing' && player.isSpectator && (
                         <div className="mt-3 bg-slate-950/95 border border-purple-500/40 p-2 rounded-xl text-purple-300 text-xs font-semibold">
                           Low Chips / Spectating Mode
@@ -1342,48 +1341,87 @@ export default function App() {
                       )}
 
                       {isUser && gameStatus === 'playing' && isCurrentTurn && !player.isSpectator && (
-                        <div className="mt-3 flex items-center gap-2 bg-slate-950/95 border border-emerald-500/40 p-2 rounded-2xl shadow-2xl backdrop-blur">
-                          {player.isBlind && (
+                        <div className="mt-3 flex flex-col items-center gap-1.5 bg-slate-950/95 border border-emerald-500/40 p-2.5 rounded-2xl shadow-2xl backdrop-blur">
+                          
+                          {/* Custom Stake Selector & Reset Row */}
+                          <div className="flex items-center gap-1 flex-wrap justify-center">
+                            <span className="text-[10px] font-semibold uppercase text-slate-400 mr-1">Custom Stake:</span>
+                            {STAKE_OPTIONS.map(stakeOpt => {
+                              const isDisabled = player.chips < stakeOpt;
+                              const isSelected = customStake === stakeOpt;
+
+                              return (
+                                <button
+                                  key={stakeOpt}
+                                  disabled={isDisabled}
+                                  onClick={() => setCustomStake(isSelected ? null : stakeOpt)}
+                                  className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition ${
+                                    isSelected
+                                      ? 'bg-emerald-500 text-slate-950 ring-1 ring-emerald-300'
+                                      : isDisabled
+                                      ? 'bg-slate-900 text-slate-600 cursor-not-allowed opacity-40'
+                                      : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                                  }`}
+                                >
+                                  ${stakeOpt}
+                                </button>
+                              );
+                            })}
+                            {customStake !== null && (
+                              <button
+                                onClick={() => setCustomStake(null)}
+                                className="ml-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 flex items-center gap-1 transition"
+                                title="Reset custom stake selection"
+                              >
+                                <RotateCcw className="w-2.5 h-2.5" /> Reset
+                              </button>
+                            )}
+                          </div>
+
+                          {/* Action Buttons Row */}
+                          <div className="flex items-center gap-2">
+                            {player.isBlind && (
+                              <button 
+                                onClick={() => onSeeCardsClick(player)} 
+                                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-xs font-bold text-slate-200 flex items-center gap-1"
+                              >
+                                <Eye className="w-3 h-3 text-emerald-400" /> See Cards
+                              </button>
+                            )}
                             <button 
-                              onClick={() => onSeeCardsClick(player)} 
-                              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-xs font-bold text-slate-200 flex items-center gap-1"
+                              onClick={() => onPackClick(player)} 
+                              className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 rounded-xl text-xs font-bold text-rose-300"
                             >
-                              <Eye className="w-3 h-3 text-emerald-400" /> See Cards
+                              Pack
                             </button>
-                          )}
-                          <button 
-                            onClick={() => onPackClick(player)} 
-                            className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 rounded-xl text-xs font-bold text-rose-300"
-                          >
-                            Pack
-                          </button>
-                          <button 
-                            disabled={!canAffordBet}
-                            onClick={() => onChaalClick(player)} 
-                            className={`px-4 py-1.5 rounded-xl text-xs font-extrabold transition shadow-md ${
-                              canAffordBet
-                                ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-emerald-500/20'
-                                : 'bg-slate-800 text-slate-500 cursor-not-allowed opacity-50'
-                            }`}
-                          >
-                            {canAffordBet ? `Chaal ($${calculatedBetAmount})` : 'Low Chips'}
-                          </button>
-                          {activePlayers.length >= 3 && !player.isBlind && (
                             <button 
-                              onClick={() => onSideShowClick(player)}
-                              className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 rounded-xl text-xs font-bold text-amber-300 transition"
+                              disabled={!canAffordBet}
+                              onClick={() => onChaalClick(player)} 
+                              className={`px-4 py-1.5 rounded-xl text-xs font-extrabold transition shadow-md ${
+                                canAffordBet
+                                  ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-emerald-500/20'
+                                  : 'bg-slate-800 text-slate-500 cursor-not-allowed opacity-50'
+                              }`}
                             >
-                              Side Show
+                              {canAffordBet ? `Chaal ($${calculatedBetAmount})` : 'Low Chips'}
                             </button>
-                          )}
-                          {activePlayers.length === 2 && (
-                            <button 
-                              onClick={onShowCardsClick} 
-                              className="px-3 py-1.5 bg-teal-500 hover:bg-teal-400 text-slate-950 rounded-xl text-xs font-extrabold transition"
-                            >
-                              Show
-                            </button>
-                          )}
+                            {activePlayers.length >= 3 && !player.isBlind && (
+                              <button 
+                                onClick={() => onSideShowClick(player)}
+                                className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 rounded-xl text-xs font-bold text-amber-300 transition"
+                              >
+                                Side Show
+                              </button>
+                            )}
+                            {activePlayers.length === 2 && (
+                              <button 
+                                onClick={onShowCardsClick} 
+                                className="px-3 py-1.5 bg-teal-500 hover:bg-teal-400 text-slate-950 rounded-xl text-xs font-extrabold transition"
+                              >
+                                Show
+                              </button>
+                            )}
+                          </div>
                         </div>
                       )}
                     </div>
