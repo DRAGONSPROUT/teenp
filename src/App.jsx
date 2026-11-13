@@ -129,33 +129,63 @@ export default function App() {
     } catch (e) {}
   };
 
-  const getStableSessionId = () => {
-    let sid = getSessionStorageItem('tp_session_id', null);
-    if (!sid) {
-      sid = 'sid_' + Math.random().toString(36).substring(2, 11);
-      setSessionStorageItem('tp_session_id', sid);
+  /**
+   * Room-Scoped Session & 2-Minute Threshold Management:
+   * - Ensures joining a new room creates a fresh session.
+   * - Rejoining or reloading the same room within 2 minutes preserves session & chips.
+   * - If room changes or > 2 minutes have elapsed since last activity/leave, session resets to default ($5000).
+   */
+  const getRoomScopedSession = (targetRoomCode) => {
+    const cleanRoom = targetRoomCode ? targetRoomCode.trim().toUpperCase() : '';
+    const lastRoom = getSessionStorageItem('tp_last_active_room', '');
+    const lastTimestamp = getSessionStorageItem('tp_room_timestamp', 0);
+    const now = Date.now();
+    const TWO_MINUTES_MS = 2 * 60 * 1000;
+
+    let sessionId = getSessionStorageItem('tp_session_id', null);
+    let registry = getSessionStorageItem('tp_player_chips_registry', {});
+
+    const isSameRoomWithinThreshold = cleanRoom && lastRoom === cleanRoom && (now - lastTimestamp < TWO_MINUTES_MS);
+
+    if (!isSameRoomWithinThreshold || !sessionId) {
+      // New room or threshold exceeded (> 2 mins) -> Create a fresh session and reset registry for this room
+      sessionId = 'sid_' + Math.random().toString(36).substring(2, 11);
+      registry = {}; // Fresh chips for new session / room
+      setSessionStorageItem('tp_session_id', sessionId);
+      setSessionStorageItem('tp_player_chips_registry', registry);
     }
-    return sid;
+
+    // Update active room and timestamp
+    setSessionStorageItem('tp_last_active_room', cleanRoom);
+    setSessionStorageItem('tp_room_timestamp', now);
+
+    return { sessionId, registry };
   };
 
-  const getSavedPlayerChips = (sessionId) => {
-    const registry = getSessionStorageItem('tp_player_chips_registry', {});
+  const getSavedPlayerChips = (sessionId, targetRoomCode) => {
+    const { registry } = getRoomScopedSession(targetRoomCode);
     return registry[sessionId] !== undefined ? registry[sessionId] : 5000;
   };
 
-  const savePlayerChipsRegistry = (sessionId, chips) => {
-    const registry = getSessionStorageItem('tp_player_chips_registry', {});
-    registry[sessionId] = chips;
+  const savePlayerChipsRegistry = (sessionId, chips, targetRoomCode) => {
+    const { sessionId: activeSid, registry } = getRoomScopedSession(targetRoomCode);
+    const sidToUse = sessionId || activeSid;
+    registry[sidToUse] = chips;
     setSessionStorageItem('tp_player_chips_registry', registry);
+    setSessionStorageItem('tp_room_timestamp', Date.now());
   };
 
+  // Auto-reconnect check on mount if previously in an active room within 2 min threshold
   useEffect(() => {
     const savedRoom = getSessionStorageItem('tp_active_room', null);
     const savedName = getSessionStorageItem('tp_player_name', 'Player 1');
     const savedIsHost = getSessionStorageItem('tp_is_host', false);
     const savedMyId = getSessionStorageItem('tp_my_player_id', null);
+    const lastTimestamp = getSessionStorageItem('tp_room_timestamp', 0);
+    const now = Date.now();
+    const TWO_MINUTES_MS = 2 * 60 * 1000;
 
-    if (savedRoom && savedMyId) {
+    if (savedRoom && savedMyId && (now - lastTimestamp < TWO_MINUTES_MS)) {
       setRoomCode(savedRoom);
       setPlayerName(savedName);
       setIsHost(savedIsHost);
@@ -166,6 +196,10 @@ export default function App() {
       } else {
         initGuestPeer(savedRoom, savedMyId, savedName);
       }
+    } else {
+      // Clear expired room session
+      sessionStorage.removeItem('tp_active_room');
+      sessionStorage.removeItem('tp_my_player_id');
     }
   }, []);
 
@@ -175,6 +209,7 @@ export default function App() {
       setSessionStorageItem('tp_player_name', playerName);
       setSessionStorageItem('tp_is_host', isHost);
       setSessionStorageItem('tp_my_player_id', myPlayerId);
+      setSessionStorageItem('tp_room_timestamp', Date.now());
     }
   }, [inLobby, roomCode, playerName, isHost, myPlayerId]);
 
@@ -360,8 +395,8 @@ export default function App() {
     });
 
     peer.on('open', () => {
-      const sessionId = getStableSessionId();
-      const initialChips = getSavedPlayerChips(sessionId);
+      const { sessionId } = getRoomScopedSession(formattedCode);
+      const initialChips = getSavedPlayerChips(sessionId, formattedCode);
 
       setPlayers(prev => {
         if (prev.some(p => p.id === hostId)) return prev;
@@ -423,6 +458,9 @@ export default function App() {
     const formattedCode = sanitizeCode(rawCode);
     const hostId = 'patti_host_' + formattedCode;
 
+    // Explicitly initialize fresh session when creating/joining a room
+    getRoomScopedSession(formattedCode);
+
     setRoomCode(formattedCode);
     setIsHost(true);
     setMyPlayerId(hostId);
@@ -435,8 +473,8 @@ export default function App() {
     if (peerRef.current) peerRef.current.destroy();
 
     const hostPeerId = 'patti_host_' + cleanCode;
-    const sessionId = getStableSessionId();
-    const initialChips = getSavedPlayerChips(sessionId);
+    const { sessionId } = getRoomScopedSession(cleanCode);
+    const initialChips = getSavedPlayerChips(sessionId, cleanCode);
 
     setConnStatus('Connecting to room ' + cleanCode + '...');
 
@@ -457,6 +495,7 @@ export default function App() {
           payload: {
             id: guestId,
             sessionId,
+            roomCode: cleanCode,
             name: name.trim() || 'Player',
             chips: initialChips
           }
@@ -504,7 +543,10 @@ export default function App() {
 
     cleanupAudioAndPeers();
 
-    const sessionId = getStableSessionId();
+    // Explicitly initialize fresh session for this specific room code
+    getRoomScopedSession(cleanCode);
+
+    const sessionId = getSessionStorageItem('tp_session_id', '');
     const guestId = 'patti_guest_' + sessionId + '_' + Math.random().toString(36).substring(2, 5);
 
     setMyPlayerId(guestId);
@@ -524,6 +566,7 @@ export default function App() {
     }
     sessionStorage.removeItem('tp_active_room');
     sessionStorage.removeItem('tp_my_player_id');
+    sessionStorage.setItem('tp_room_timestamp', 0); // Force session expiry on deliberate leave
     cleanupAudioAndPeers();
     setPlayers([]);
     setInLobby(true);
@@ -537,7 +580,8 @@ export default function App() {
     if (!data || !data.type) return;
 
     if (data.type === 'JOIN_REQUEST' && isHostRef.current) {
-      const { id, sessionId, name, chips } = data.payload;
+      const { id, sessionId, roomCode: reqRoomCode, name, chips } = data.payload;
+      const targetRoom = reqRoomCode || roomCode;
 
       setPlayers(prev => {
         const currentHumans = prev.filter(p => !p.isBot);
@@ -556,7 +600,7 @@ export default function App() {
           return true;
         });
 
-        const restoredChips = chips !== undefined ? chips : getSavedPlayerChips(sessionId);
+        const restoredChips = chips !== undefined ? chips : getSavedPlayerChips(sessionId, targetRoom);
         const newPlayer = {
           id,
           sessionId,
@@ -611,7 +655,7 @@ export default function App() {
 
       data.payload.players.forEach(p => {
         if (p.id === myPlayerIdRef.current || p.sessionId === getSessionStorageItem('tp_session_id', '')) {
-          savePlayerChipsRegistry(p.sessionId || getStableSessionId(), p.chips);
+          savePlayerChipsRegistry(p.sessionId || getSessionStorageItem('tp_session_id', ''), p.chips, roomCode);
         }
       });
     } else if (['ACTION_CHAAL', 'ACTION_PACK', 'ACTION_SEE_CARDS', 'REQUEST_SIDESHOW', 'RESPOND_SIDESHOW', 'SHOW_CARDS'].includes(data.type)) {
@@ -661,13 +705,6 @@ export default function App() {
     return prevIndex;
   };
 
-  /**
-   * Base Minimum Required Bet for Player according to relative Blind vs Seen rules:
-   * - Blind vs Blind: 1x (refMaxStake)
-   * - Seen vs Blind: 2x (refMaxStake * 2)
-   * - Blind vs Seen: 0.5x (Math.floor(refMaxStake / 2))
-   * - Seen vs Seen: 1x (refMaxStake)
-   */
   const getBaseRequiredBetForPlayer = (player, refMaxStake, refMaxStakeIsBlind) => {
     const isPlayerBlind = player.isBlind;
 
@@ -682,11 +719,6 @@ export default function App() {
     }
   };
 
-  /**
-   * Final Chaal value:
-   * - If a custom stake option is selected, use that custom stake value.
-   * - Otherwise, use the required minimum bet derived from max stake rules.
-   */
   const getEffectiveChaalAmount = (player, refMaxStake, refMaxStakeIsBlind) => {
     const minRequired = getBaseRequiredBetForPlayer(player, refMaxStake, refMaxStakeIsBlind);
     if (customStake !== null) {
@@ -714,7 +746,6 @@ export default function App() {
       const actingPlayer = updatedPlayers.find(p => p.id === playerId);
       const minRequired = actingPlayer ? getBaseRequiredBetForPlayer(actingPlayer, newMaxStakeAmount, newMaxStakeIsBlind) : 0;
       
-      // Guard against invalid bets (< minRequired), insufficient chips, or spectator players
       if (!actingPlayer || actingPlayer.chips < totalBet || totalBet < minRequired || actingPlayer.isSpectator) return;
 
       updatedPlayers = updatedPlayers.map(p => {
@@ -730,14 +761,13 @@ export default function App() {
       });
 
       newPot += totalBet;
-      // Update max stake amount and whether the max-stake bidder is blind or seen
       if (totalBet >= newMaxStakeAmount) {
         newMaxStakeAmount = totalBet;
         newMaxStakeIsBlind = actingPlayer.isBlind;
       }
       newStake = totalBet;
 
-      savePlayerChipsRegistry(actingPlayer.sessionId || actingPlayer.id, actingPlayer.chips - totalBet);
+      savePlayerChipsRegistry(actingPlayer.sessionId || actingPlayer.id, actingPlayer.chips - totalBet, roomCode);
 
       const active = updatedPlayers.filter(p => !p.folded && !p.isSpectator);
       if (active.length === 1) {
@@ -909,7 +939,7 @@ export default function App() {
 
       totalInitialPot += bootAmount;
       const newChips = p.chips - bootAmount;
-      savePlayerChipsRegistry(p.sessionId || p.id, newChips);
+      savePlayerChipsRegistry(p.sessionId || p.id, newChips, roomCode);
 
       return {
         ...p,
@@ -954,7 +984,7 @@ export default function App() {
     const finalPlayers = updatedPlayers.map(p => {
       const won = p.id === winner.id;
       const newChips = won ? p.chips + finalPot : p.chips;
-      savePlayerChipsRegistry(p.sessionId || p.id, newChips);
+      savePlayerChipsRegistry(p.sessionId || p.id, newChips, roomCode);
       return {
         ...p,
         isBlind: false,
@@ -1024,7 +1054,6 @@ export default function App() {
   };
 
   const onSeeCardsClick = (player) => {
-    // If player sees cards while a custom stake is selected that becomes lower than the new required bet, auto-reset customStake
     const nextRequired = getBaseRequiredBetForPlayer({ ...player, isBlind: false }, maxStakeAmount, maxStakeIsBlind);
     if (customStake !== null && customStake < nextRequired) {
       setCustomStake(null);
@@ -1369,11 +1398,10 @@ export default function App() {
                       {isUser && gameStatus === 'playing' && isCurrentTurn && !player.isSpectator && (
                         <div className="mt-3 flex flex-col items-center gap-1.5 bg-slate-950/95 border border-emerald-500/40 p-2.5 rounded-2xl shadow-2xl backdrop-blur">
                           
-                          {/* Custom Stake Selector & Reset Row (enabled/disabled according to minRequiredBet & chips) */}
+                          {/* Custom Stake Selector & Reset Row */}
                           <div className="flex items-center gap-1 flex-wrap justify-center">
                             <span className="text-[10px] font-semibold uppercase text-slate-400 mr-1">Custom Stake:</span>
                             {STAKE_OPTIONS.map(stakeOpt => {
-                              // Enabled only if stakeOpt meets or exceeds minimum required bet under current Blind/Seen logic AND player has enough chips
                               const isAllowed = stakeOpt >= minRequiredBet && player.chips >= stakeOpt;
                               const isSelected = customStake === stakeOpt;
 
