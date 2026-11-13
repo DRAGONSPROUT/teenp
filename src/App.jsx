@@ -62,7 +62,7 @@ export default function App() {
   const [pot, setPot] = useState(0);
   const [currentStake, setCurrentStake] = useState(100);
   const [maxStakeAmount, setMaxStakeAmount] = useState(100);
-  // Custom Stake Option (null if using standard relative rule, otherwise holds exact chosen stake)
+  const [maxStakeIsBlind, setMaxStakeIsBlind] = useState(true);
   const [customStake, setCustomStake] = useState(null);
   const [gameStatus, setGameStatus] = useState('waiting');
   const [turnCount, setTurnCount] = useState(0);
@@ -87,6 +87,7 @@ export default function App() {
   const potRef = useRef(pot);
   const currentStakeRef = useRef(currentStake);
   const maxStakeAmountRef = useRef(maxStakeAmount);
+  const maxStakeIsBlindRef = useRef(maxStakeIsBlind);
   const turnCountRef = useRef(turnCount);
   const gameStatusRef = useRef(gameStatus);
   const sideShowModalRef = useRef(sideShowModal);
@@ -100,6 +101,7 @@ export default function App() {
   useEffect(() => { potRef.current = pot; }, [pot]);
   useEffect(() => { currentStakeRef.current = currentStake; }, [currentStake]);
   useEffect(() => { maxStakeAmountRef.current = maxStakeAmount; }, [maxStakeAmount]);
+  useEffect(() => { maxStakeIsBlindRef.current = maxStakeIsBlind; }, [maxStakeIsBlind]);
   useEffect(() => { turnCountRef.current = turnCount; }, [turnCount]);
   useEffect(() => { gameStatusRef.current = gameStatus; }, [gameStatus]);
   useEffect(() => { sideShowModalRef.current = sideShowModal; }, [sideShowModal]);
@@ -577,6 +579,7 @@ export default function App() {
           gameStatus: gameStatusRef.current,
           currentStake: currentStakeRef.current,
           maxStakeAmount: maxStakeAmountRef.current,
+          maxStakeIsBlind: maxStakeIsBlindRef.current,
           turnCount: turnCountRef.current,
           roundResult: roundResultRef.current,
           sideShowModal: sideShowModalRef.current
@@ -599,6 +602,7 @@ export default function App() {
       setGameStatus(data.payload.gameStatus);
       setCurrentStake(data.payload.currentStake);
       setMaxStakeAmount(data.payload.maxStakeAmount || data.payload.currentStake);
+      setMaxStakeIsBlind(data.payload.maxStakeIsBlind !== undefined ? data.payload.maxStakeIsBlind : true);
       setTurnCount(data.payload.turnCount);
       setRoundResult(data.payload.roundResult || null);
       setSideShowModal(data.payload.sideShowModal || null);
@@ -639,6 +643,7 @@ export default function App() {
           gameStatus: gameStatusRef.current,
           currentStake: currentStakeRef.current,
           maxStakeAmount: maxStakeAmountRef.current,
+          maxStakeIsBlind: maxStakeIsBlindRef.current,
           turnCount: turnCountRef.current,
           roundResult: roundResultRef.current,
           sideShowModal: sideShowModalRef.current
@@ -657,30 +662,37 @@ export default function App() {
   };
 
   /**
-   * Stake Calculation combining Custom Stake option + Relative Blind/Seen rules:
-   * 1. If user explicitly chooses a custom stake option (`customStake !== null`), use that exact value.
-   * 2. Otherwise, use relative Blind vs Seen rules based on reference max-stake player (`maxStakeAmount`):
-   *    - Blind vs Blind: 1x (maxStakeAmount)
-   *    - Seen vs Blind: 2x (maxStakeAmount * 2)
-   *    - Blind vs Seen: 0.5x (Math.floor(maxStakeAmount / 2))
-   *    - Seen vs Seen: 1x (maxStakeAmount)
+   * Base Minimum Required Bet for Player according to relative Blind vs Seen rules:
+   * - Blind vs Blind: 1x (refMaxStake)
+   * - Seen vs Blind: 2x (refMaxStake * 2)
+   * - Blind vs Seen: 0.5x (Math.floor(refMaxStake / 2))
+   * - Seen vs Seen: 1x (refMaxStake)
    */
-  const getRequiredBetForPlayer = (player, refMaxStake, maxStakePlayerIsBlind) => {
-    if (customStake !== null) {
-      return customStake;
-    }
-
+  const getBaseRequiredBetForPlayer = (player, refMaxStake, refMaxStakeIsBlind) => {
     const isPlayerBlind = player.isBlind;
 
-    if (isPlayerBlind && maxStakePlayerIsBlind) {
+    if (isPlayerBlind && refMaxStakeIsBlind) {
       return refMaxStake;
-    } else if (!isPlayerBlind && maxStakePlayerIsBlind) {
+    } else if (!isPlayerBlind && refMaxStakeIsBlind) {
       return refMaxStake * 2;
-    } else if (isPlayerBlind && !maxStakePlayerIsBlind) {
+    } else if (isPlayerBlind && !refMaxStakeIsBlind) {
       return Math.max(1, Math.floor(refMaxStake / 2));
     } else {
       return refMaxStake;
     }
+  };
+
+  /**
+   * Final Chaal value:
+   * - If a custom stake option is selected, use that custom stake value.
+   * - Otherwise, use the required minimum bet derived from max stake rules.
+   */
+  const getEffectiveChaalAmount = (player, refMaxStake, refMaxStakeIsBlind) => {
+    const minRequired = getBaseRequiredBetForPlayer(player, refMaxStake, refMaxStakeIsBlind);
+    if (customStake !== null) {
+      return customStake;
+    }
+    return minRequired;
   };
 
   const handleActionMessage = (actionData) => {
@@ -692,6 +704,7 @@ export default function App() {
     let newTurnCount = turnCountRef.current;
     let newStake = currentStakeRef.current;
     let newMaxStakeAmount = maxStakeAmountRef.current;
+    let newMaxStakeIsBlind = maxStakeIsBlindRef.current;
     let newGameStatus = gameStatusRef.current;
     let newRoundResult = roundResultRef.current;
     let newSideShowModal = sideShowModalRef.current;
@@ -699,8 +712,10 @@ export default function App() {
     if (actionData.type === 'ACTION_CHAAL') {
       const { playerId, totalBet } = actionData.payload;
       const actingPlayer = updatedPlayers.find(p => p.id === playerId);
+      const minRequired = actingPlayer ? getBaseRequiredBetForPlayer(actingPlayer, newMaxStakeAmount, newMaxStakeIsBlind) : 0;
       
-      if (!actingPlayer || actingPlayer.chips < totalBet || actingPlayer.isSpectator) return;
+      // Guard against invalid bets (< minRequired), insufficient chips, or spectator players
+      if (!actingPlayer || actingPlayer.chips < totalBet || totalBet < minRequired || actingPlayer.isSpectator) return;
 
       updatedPlayers = updatedPlayers.map(p => {
         if (p.id === playerId) {
@@ -715,7 +730,11 @@ export default function App() {
       });
 
       newPot += totalBet;
-      newMaxStakeAmount = totalBet;
+      // Update max stake amount and whether the max-stake bidder is blind or seen
+      if (totalBet >= newMaxStakeAmount) {
+        newMaxStakeAmount = totalBet;
+        newMaxStakeIsBlind = actingPlayer.isBlind;
+      }
       newStake = totalBet;
 
       savePlayerChipsRegistry(actingPlayer.sessionId || actingPlayer.id, actingPlayer.chips - totalBet);
@@ -802,6 +821,7 @@ export default function App() {
     setTurnCount(newTurnCount);
     setCurrentStake(newStake);
     setMaxStakeAmount(newMaxStakeAmount);
+    setMaxStakeIsBlind(newMaxStakeIsBlind);
     setGameStatus(newGameStatus);
     setSideShowModal(newSideShowModal);
 
@@ -812,6 +832,7 @@ export default function App() {
       gameStatus: newGameStatus,
       currentStake: newStake,
       maxStakeAmount: newMaxStakeAmount,
+      maxStakeIsBlind: newMaxStakeIsBlind,
       turnCount: newTurnCount,
       roundResult: newRoundResult,
       sideShowModal: newSideShowModal
@@ -833,9 +854,7 @@ export default function App() {
     const currentPlayer = players[currentTurn];
     if (currentPlayer && currentPlayer.isBot && !currentPlayer.folded && !currentPlayer.isSpectator) {
       const botTimer = setTimeout(() => {
-        const lastMaxPlayer = players.reduce((max, p) => (!p.folded && !p.isSpectator ? p : max), players[0]);
-        const maxStakeIsBlind = lastMaxPlayer ? lastMaxPlayer.isBlind : true;
-        const requiredAmount = getRequiredBetForPlayer(currentPlayer, maxStakeAmount, maxStakeIsBlind);
+        const requiredAmount = getBaseRequiredBetForPlayer(currentPlayer, maxStakeAmount, maxStakeIsBlind);
 
         if (currentPlayer.chips < requiredAmount || (Math.random() < 0.15 && turnCount > 2)) {
           handleActionMessage({
@@ -852,7 +871,7 @@ export default function App() {
 
       return () => clearTimeout(botTimer);
     }
-  }, [currentTurn, gameStatus, isHost, players, maxStakeAmount, turnCount]);
+  }, [currentTurn, gameStatus, isHost, players, maxStakeAmount, maxStakeIsBlind, turnCount]);
 
   const startGame = () => {
     let currentPlayers = players.filter(p => !p.isBot);
@@ -906,6 +925,7 @@ export default function App() {
     setPot(totalInitialPot);
     setCurrentStake(bootAmount);
     setMaxStakeAmount(bootAmount);
+    setMaxStakeIsBlind(true);
     setCustomStake(null);
     setCurrentTurn(0);
     setTurnCount(1);
@@ -921,6 +941,7 @@ export default function App() {
         gameStatus: 'playing',
         currentStake: bootAmount,
         maxStakeAmount: bootAmount,
+        maxStakeIsBlind: true,
         turnCount: 1,
         roundResult: null,
         sideShowModal: null
@@ -960,6 +981,7 @@ export default function App() {
       gameStatus: 'ended',
       currentStake: currentStakeRef.current,
       maxStakeAmount: maxStakeAmountRef.current,
+      maxStakeIsBlind: maxStakeIsBlindRef.current,
       turnCount: turnCountRef.current,
       roundResult: resData,
       sideShowModal: null
@@ -983,11 +1005,10 @@ export default function App() {
   };
 
   const onChaalClick = (player) => {
-    const lastMaxPlayer = players.reduce((max, p) => (!p.folded && !p.isSpectator ? p : max), players[0]);
-    const maxStakeIsBlind = lastMaxPlayer ? lastMaxPlayer.isBlind : true;
-    const totalBet = getRequiredBetForPlayer(player, maxStakeAmount, maxStakeIsBlind);
+    const totalBet = getEffectiveChaalAmount(player, maxStakeAmount, maxStakeIsBlind);
+    const minRequired = getBaseRequiredBetForPlayer(player, maxStakeAmount, maxStakeIsBlind);
 
-    if (player.chips < totalBet || player.isSpectator) return;
+    if (player.chips < totalBet || totalBet < minRequired || player.isSpectator) return;
 
     sendActionToHostOrPeers({
       type: 'ACTION_CHAAL',
@@ -1003,6 +1024,12 @@ export default function App() {
   };
 
   const onSeeCardsClick = (player) => {
+    // If player sees cards while a custom stake is selected that becomes lower than the new required bet, auto-reset customStake
+    const nextRequired = getBaseRequiredBetForPlayer({ ...player, isBlind: false }, maxStakeAmount, maxStakeIsBlind);
+    if (customStake !== null && customStake < nextRequired) {
+      setCustomStake(null);
+    }
+
     sendActionToHostOrPeers({
       type: 'ACTION_SEE_CARDS',
       payload: { playerId: player.id }
@@ -1197,7 +1224,7 @@ export default function App() {
 
                 {gameStatus === 'playing' && (
                   <div className="mt-2 text-xs font-mono text-slate-400 bg-slate-900/80 px-3 py-1 rounded-full border border-slate-800">
-                    Max Stake: <span className="text-emerald-400 font-bold">${maxStakeAmount}</span>
+                    Max Stake: <span className="text-emerald-400 font-bold">${maxStakeAmount}</span> ({maxStakeIsBlind ? 'Blind' : 'Seen'})
                   </div>
                 )}
 
@@ -1255,10 +1282,9 @@ export default function App() {
                   const isUser = player.id === myPlayerId;
                   const revealCard = (isUser && !player.isBlind) || gameStatus === 'ended';
 
-                  const lastMaxPlayer = players.reduce((max, p) => (!p.folded && !p.isSpectator ? p : max), players[0]);
-                  const maxStakeIsBlind = lastMaxPlayer ? lastMaxPlayer.isBlind : true;
-                  const calculatedBetAmount = getRequiredBetForPlayer(player, maxStakeAmount, maxStakeIsBlind);
-                  const canAffordBet = player.chips >= calculatedBetAmount;
+                  const minRequiredBet = getBaseRequiredBetForPlayer(player, maxStakeAmount, maxStakeIsBlind);
+                  const chaalBetAmount = getEffectiveChaalAmount(player, maxStakeAmount, maxStakeIsBlind);
+                  const canAffordBet = player.chips >= chaalBetAmount && chaalBetAmount >= minRequiredBet;
 
                   return (
                     <div 
@@ -1343,22 +1369,23 @@ export default function App() {
                       {isUser && gameStatus === 'playing' && isCurrentTurn && !player.isSpectator && (
                         <div className="mt-3 flex flex-col items-center gap-1.5 bg-slate-950/95 border border-emerald-500/40 p-2.5 rounded-2xl shadow-2xl backdrop-blur">
                           
-                          {/* Custom Stake Selector & Reset Row */}
+                          {/* Custom Stake Selector & Reset Row (enabled/disabled according to minRequiredBet & chips) */}
                           <div className="flex items-center gap-1 flex-wrap justify-center">
                             <span className="text-[10px] font-semibold uppercase text-slate-400 mr-1">Custom Stake:</span>
                             {STAKE_OPTIONS.map(stakeOpt => {
-                              const isDisabled = player.chips < stakeOpt;
+                              // Enabled only if stakeOpt meets or exceeds minimum required bet under current Blind/Seen logic AND player has enough chips
+                              const isAllowed = stakeOpt >= minRequiredBet && player.chips >= stakeOpt;
                               const isSelected = customStake === stakeOpt;
 
                               return (
                                 <button
                                   key={stakeOpt}
-                                  disabled={isDisabled}
+                                  disabled={!isAllowed}
                                   onClick={() => setCustomStake(isSelected ? null : stakeOpt)}
                                   className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition ${
                                     isSelected
                                       ? 'bg-emerald-500 text-slate-950 ring-1 ring-emerald-300'
-                                      : isDisabled
+                                      : !isAllowed
                                       ? 'bg-slate-900 text-slate-600 cursor-not-allowed opacity-40'
                                       : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
                                   }`}
@@ -1403,7 +1430,7 @@ export default function App() {
                                   : 'bg-slate-800 text-slate-500 cursor-not-allowed opacity-50'
                               }`}
                             >
-                              {canAffordBet ? `Chaal ($${calculatedBetAmount})` : 'Low Chips'}
+                              {canAffordBet ? `Chaal ($${chaalBetAmount})` : 'Low Chips'}
                             </button>
                             {activePlayers.length >= 3 && !player.isBlind && (
                               <button 
