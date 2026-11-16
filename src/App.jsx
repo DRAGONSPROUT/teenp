@@ -129,12 +129,6 @@ export default function App() {
     } catch (e) {}
   };
 
-  /**
-   * Room-Scoped Session & 2-Minute Threshold Management:
-   * - Ensures joining a new room creates a fresh session.
-   * - Rejoining or reloading the same room within 2 minutes preserves session & chips.
-   * - If room changes or > 2 minutes have elapsed since last activity/leave, session resets to default ($5000).
-   */
   const getRoomScopedSession = (targetRoomCode) => {
     const cleanRoom = targetRoomCode ? targetRoomCode.trim().toUpperCase() : '';
     const lastRoom = getSessionStorageItem('tp_last_active_room', '');
@@ -148,14 +142,12 @@ export default function App() {
     const isSameRoomWithinThreshold = cleanRoom && lastRoom === cleanRoom && (now - lastTimestamp < TWO_MINUTES_MS);
 
     if (!isSameRoomWithinThreshold || !sessionId) {
-      // New room or threshold exceeded (> 2 mins) -> Create a fresh session and reset registry for this room
       sessionId = 'sid_' + Math.random().toString(36).substring(2, 11);
-      registry = {}; // Fresh chips for new session / room
+      registry = {};
       setSessionStorageItem('tp_session_id', sessionId);
       setSessionStorageItem('tp_player_chips_registry', registry);
     }
 
-    // Update active room and timestamp
     setSessionStorageItem('tp_last_active_room', cleanRoom);
     setSessionStorageItem('tp_room_timestamp', now);
 
@@ -175,7 +167,6 @@ export default function App() {
     setSessionStorageItem('tp_room_timestamp', Date.now());
   };
 
-  // Auto-reconnect check on mount if previously in an active room within 2 min threshold
   useEffect(() => {
     const savedRoom = getSessionStorageItem('tp_active_room', null);
     const savedName = getSessionStorageItem('tp_player_name', 'Player 1');
@@ -197,7 +188,6 @@ export default function App() {
         initGuestPeer(savedRoom, savedMyId, savedName);
       }
     } else {
-      // Clear expired room session
       sessionStorage.removeItem('tp_active_room');
       sessionStorage.removeItem('tp_my_player_id');
     }
@@ -458,7 +448,6 @@ export default function App() {
     const formattedCode = sanitizeCode(rawCode);
     const hostId = 'patti_host_' + formattedCode;
 
-    // Explicitly initialize fresh session when creating/joining a room
     getRoomScopedSession(formattedCode);
 
     setRoomCode(formattedCode);
@@ -543,7 +532,6 @@ export default function App() {
 
     cleanupAudioAndPeers();
 
-    // Explicitly initialize fresh session for this specific room code
     getRoomScopedSession(cleanCode);
 
     const sessionId = getSessionStorageItem('tp_session_id', '');
@@ -566,7 +554,7 @@ export default function App() {
     }
     sessionStorage.removeItem('tp_active_room');
     sessionStorage.removeItem('tp_my_player_id');
-    sessionStorage.setItem('tp_room_timestamp', 0); // Force session expiry on deliberate leave
+    sessionStorage.setItem('tp_room_timestamp', 0);
     cleanupAudioAndPeers();
     setPlayers([]);
     setInLobby(true);
@@ -658,7 +646,7 @@ export default function App() {
           savePlayerChipsRegistry(p.sessionId || getSessionStorageItem('tp_session_id', ''), p.chips, roomCode);
         }
       });
-    } else if (['ACTION_CHAAL', 'ACTION_PACK', 'ACTION_SEE_CARDS', 'REQUEST_SIDESHOW', 'RESPOND_SIDESHOW', 'SHOW_CARDS'].includes(data.type)) {
+    } else if (['ACTION_CHAAL', 'ACTION_PACK', 'ACTION_SEE_CARDS', 'REQUEST_SIDESHOW', 'RESPOND_SIDESHOW', 'SHOW_CARDS', 'START_GAME'].includes(data.type)) {
       handleActionMessage(data);
     }
   };
@@ -728,6 +716,13 @@ export default function App() {
   };
 
   const handleActionMessage = (actionData) => {
+    if (actionData.type === 'START_GAME') {
+      if (isHostRef.current) {
+        executeStartGameHost();
+      }
+      return;
+    }
+
     if (!isHostRef.current) return;
 
     let updatedPlayers = [...playersRef.current];
@@ -903,29 +898,38 @@ export default function App() {
     }
   }, [currentTurn, gameStatus, isHost, players, maxStakeAmount, maxStakeIsBlind, turnCount]);
 
-  const startGame = () => {
-    let currentPlayers = players.filter(p => !p.isBot);
+  const executeStartGameHost = () => {
+    let currentPlayers = playersRef.current.filter(p => !p.isBot);
     const neededBots = Math.max(0, maxSeats - currentPlayers.length);
     
-    for (let i = 0; i < neededBots; i++) {
-      currentPlayers.push({
-        id: `bot_${i}_${Date.now()}`,
-        sessionId: `bot_sid_${i}`,
-        name: `${BOT_NAMES[i % BOT_NAMES.length]} (Bot)`,
-        isHost: false,
-        isBot: true,
-        chips: 5000,
-        cards: [],
-        isBlind: true,
-        folded: false,
-        isSpectator: false
-      });
+    // Ensure bots exist if needed
+    let allActivePlayers = [...currentPlayers];
+    const existingBots = playersRef.current.filter(p => p.isBot);
+
+    if (existingBots.length >= neededBots) {
+      allActivePlayers = [...currentPlayers, ...existingBots.slice(0, neededBots)];
+    } else {
+      allActivePlayers = [...currentPlayers];
+      for (let i = existingBots.length; i < neededBots; i++) {
+        allActivePlayers.push({
+          id: `bot_${i}_${Date.now()}`,
+          sessionId: `bot_sid_${i}`,
+          name: `${BOT_NAMES[i % BOT_NAMES.length]} (Bot)`,
+          isHost: false,
+          isBot: true,
+          chips: 5000,
+          cards: [],
+          isBlind: true,
+          folded: false,
+          isSpectator: false
+        });
+      }
     }
 
     const deck = createShuffledDeck();
     let totalInitialPot = 0;
 
-    const dealtPlayers = currentPlayers.map(p => {
+    const dealtPlayers = allActivePlayers.map(p => {
       const isSpectator = p.chips < bootAmount;
       if (isSpectator) {
         return {
@@ -951,32 +955,52 @@ export default function App() {
       };
     });
 
+    // Determine starting turn index:
+    // 1. If there is a previous winner still active/non-spectator, start with them.
+    // 2. Otherwise, find the first non-spectator player.
+    let startTurnIdx = 0;
+    if (roundResultRef.current && roundResultRef.current.winner) {
+      const winnerId = roundResultRef.current.winner.id;
+      const winnerIdx = dealtPlayers.findIndex(p => p.id === winnerId);
+      if (winnerIdx !== -1 && !dealtPlayers[winnerIdx].isSpectator && !dealtPlayers[winnerIdx].folded) {
+        startTurnIdx = winnerIdx;
+      } else {
+        startTurnIdx = dealtPlayers.findIndex(p => !p.isSpectator && !p.folded);
+        if (startTurnIdx === -1) startTurnIdx = 0;
+      }
+    } else {
+      startTurnIdx = dealtPlayers.findIndex(p => !p.isSpectator && !p.folded);
+      if (startTurnIdx === -1) startTurnIdx = 0;
+    }
+
     setPlayers(dealtPlayers);
     setPot(totalInitialPot);
     setCurrentStake(bootAmount);
     setMaxStakeAmount(bootAmount);
     setMaxStakeIsBlind(true);
     setCustomStake(null);
-    setCurrentTurn(0);
+    setCurrentTurn(startTurnIdx);
     setTurnCount(1);
     setGameStatus('playing');
     setRoundResult(null);
     setSideShowModal(null);
 
-    if (isHost) {
-      broadcastState({
-        players: dealtPlayers,
-        pot: totalInitialPot,
-        currentTurn: 0,
-        gameStatus: 'playing',
-        currentStake: bootAmount,
-        maxStakeAmount: bootAmount,
-        maxStakeIsBlind: true,
-        turnCount: 1,
-        roundResult: null,
-        sideShowModal: null
-      });
-    }
+    broadcastState({
+      players: dealtPlayers,
+      pot: totalInitialPot,
+      currentTurn: startTurnIdx,
+      gameStatus: 'playing',
+      currentStake: bootAmount,
+      maxStakeAmount: bootAmount,
+      maxStakeIsBlind: true,
+      turnCount: 1,
+      roundResult: null,
+      sideShowModal: null
+    });
+  };
+
+  const startGame = () => {
+    sendActionToHostOrPeers({ type: 'START_GAME', payload: {} });
   };
 
   const handleWinnerHost = (winner, updatedPlayers, finalPot) => {
@@ -1266,14 +1290,12 @@ export default function App() {
                     <span className="text-xs font-semibold text-emerald-400 uppercase tracking-wider">
                       {roundResult.handName}
                     </span>
-                    {isHost && (
-                      <button 
-                        onClick={startGame}
-                        className="mt-2 px-5 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold rounded-xl text-xs transition shadow-md shadow-emerald-500/20"
-                      >
-                        Play Next Hand
-                      </button>
-                    )}
+                    <button 
+                      onClick={startGame}
+                      className="mt-2 px-5 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold rounded-xl text-xs transition shadow-md shadow-emerald-500/20"
+                    >
+                      Play Next Hand
+                    </button>
                   </div>
                 )}
               </div>
@@ -1287,16 +1309,12 @@ export default function App() {
                       Share room code <span className="font-mono font-bold text-emerald-400">{roomCode}</span> with friends. Human players connected: {players.filter(p => !p.isBot).length}/{maxSeats}
                     </p>
                   </div>
-                  {isHost ? (
-                    <button 
-                      onClick={startGame}
-                      className="px-6 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-xl transition shadow-lg shadow-emerald-500/20"
-                    >
-                      Start Game Now
-                    </button>
-                  ) : (
-                    <div className="text-xs text-amber-400 font-medium">Waiting for host to deal cards...</div>
-                  )}
+                  <button 
+                    onClick={startGame}
+                    className="px-6 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-xl transition shadow-lg shadow-emerald-500/20"
+                  >
+                    Start Game Now
+                  </button>
                 </div>
               )}
 
