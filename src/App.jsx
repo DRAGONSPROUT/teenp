@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import Peer from 'peerjs';
 import { 
   Users, Volume2, VolumeX, Mic, MicOff, 
-  Eye, RefreshCw, Trophy, Crown, ArrowRight, Copy, Check, LogOut, AlertCircle, RotateCcw
+  Eye, RefreshCw, Trophy, Crown, ArrowRight, Copy, Check, LogOut, AlertCircle, RotateCcw, Wifi
 } from 'lucide-react';
 
 const HAND_RANKS = {
@@ -29,20 +29,32 @@ const SUITS = [
 const BOT_NAMES = ['Aarav', 'Vihaan', 'Ananya', 'Diya', 'Kabir', 'Rohan'];
 const STAKE_OPTIONS = [100, 200, 500, 1000];
 
+// Multi-provider TURN/STUN pool (UDP + TCP 80/443) to bypass CGNAT, Symmetric NAT, and carrier UDP blocks
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:global.stun.twilio.com:3478' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
   {
-    urls: 'turn:openrelay.metered.ca:80',
+    urls: [
+      'turn:openrelay.metered.ca:80',
+      'turn:openrelay.metered.ca:80?transport=tcp',
+      'turn:openrelay.metered.ca:443',
+      'turn:openrelay.metered.ca:443?transport=tcp',
+      'turns:openrelay.metered.ca:443?transport=tcp'
+    ],
     username: 'openrelayproject',
     credential: 'openrelayproject'
   },
   {
-    urls: 'turn:openrelay.metered.ca:443',
-    username: 'openrelayproject',
-    credential: 'openrelayproject'
+    urls: [
+      'turn:standard.relay.metered.ca:80',
+      'turn:standard.relay.metered.ca:80?transport=tcp',
+      'turn:standard.relay.metered.ca:443',
+      'turn:standard.relay.metered.ca:443?transport=tcp',
+      'turns:standard.relay.metered.ca:443?transport=tcp'
+    ],
+    username: 'e8dd65b92f6dde64',
+    credential: '12345678'
   }
 ];
 
@@ -56,6 +68,7 @@ export default function App() {
   const [myPlayerId, setMyPlayerId] = useState('');
   const [connStatus, setConnStatus] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+  const [forceRelay, setForceRelay] = useState(false);
 
   const [players, setPlayers] = useState([]);
   const [currentTurn, setCurrentTurn] = useState(0);
@@ -80,6 +93,8 @@ export default function App() {
 
   const peerRef = useRef(null);
   const connectionsRef = useRef({});
+  const joinRetryTimerRef = useRef(null);
+  const heartbeatTimerRef = useRef(null);
 
   // Real-time Master Refs
   const playersRef = useRef(players);
@@ -185,9 +200,9 @@ export default function App() {
       setMyPlayerId(savedMyId);
 
       if (savedIsHost) {
-        initHostPeer(savedRoom, savedMyId, savedName);
+        initHostPeer(savedRoom, savedMyId, savedName, false);
       } else {
-        initGuestPeer(savedRoom, savedMyId, savedName);
+        initGuestPeer(savedRoom, savedMyId, savedName, false);
       }
     } else {
       sessionStorage.removeItem('tp_active_room');
@@ -206,6 +221,14 @@ export default function App() {
   }, [inLobby, roomCode, playerName, isHost, myPlayerId]);
 
   const cleanupAudioAndPeers = () => {
+    if (joinRetryTimerRef.current) {
+      clearTimeout(joinRetryTimerRef.current);
+      joinRetryTimerRef.current = null;
+    }
+    if (heartbeatTimerRef.current) {
+      clearInterval(heartbeatTimerRef.current);
+      heartbeatTimerRef.current = null;
+    }
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => track.stop());
       localStreamRef.current = null;
@@ -378,14 +401,21 @@ export default function App() {
 
   const sanitizeCode = (code) => code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 
-  const initHostPeer = (formattedCode, hostId, name) => {
+  const buildPeerOptions = (useRelayOnly) => ({
+    config: {
+      iceServers: ICE_SERVERS,
+      iceTransportPolicy: useRelayOnly ? 'relay' : 'all',
+      iceCandidatePoolSize: 10
+    },
+    debug: 1,
+    secure: true,
+    pingInterval: 5000
+  });
+
+  const initHostPeer = (formattedCode, hostId, name, useRelayOnly = forceRelay) => {
     if (peerRef.current) peerRef.current.destroy();
 
-    const peer = new Peer(hostId, {
-      config: { iceServers: ICE_SERVERS },
-      debug: 1,
-      secure: true
-    });
+    const peer = new Peer(hostId, buildPeerOptions(useRelayOnly));
 
     peer.on('open', () => {
       const { sessionId } = getRoomScopedSession(formattedCode);
@@ -411,6 +441,14 @@ export default function App() {
       setInLobby(false);
       setGameStatus(prev => prev === 'waiting' ? 'lobby' : prev);
       setConnStatus('Room ready. Waiting for players...');
+
+      // Keep signaling WebSocket alive on mobile/carrier NATs
+      if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
+      heartbeatTimerRef.current = setInterval(() => {
+        if (peerRef.current && peerRef.current.disconnected && !peerRef.current.destroyed) {
+          try { peerRef.current.reconnect(); } catch (e) {}
+        }
+      }, 10000);
     });
 
     peer.on('connection', (conn) => {
@@ -431,11 +469,17 @@ export default function App() {
       setupMediaCall(call, call.peer);
     });
 
+    peer.on('disconnected', () => {
+      if (peer && !peer.destroyed) {
+        try { peer.reconnect(); } catch (e) {}
+      }
+    });
+
     peer.on('error', (err) => {
       if (err.type === 'unavailable-id') {
         setErrorMessage('Room code collision. Click Create again.');
       } else {
-        setErrorMessage('Peer error: ' + err.message);
+        setErrorMessage('Network error (' + err.type + '). Try enabling Relay Mode.');
       }
       setConnStatus('');
     });
@@ -458,28 +502,47 @@ export default function App() {
     setMyPlayerId(hostId);
     setConnStatus('Initializing peer room...');
 
-    initHostPeer(formattedCode, hostId, playerName);
+    initHostPeer(formattedCode, hostId, playerName, forceRelay);
   };
 
-  const initGuestPeer = (cleanCode, guestId, name) => {
+  const initGuestPeer = (cleanCode, guestId, name, useRelayOnly = forceRelay, attempt = 1) => {
     if (peerRef.current) peerRef.current.destroy();
 
     const hostPeerId = 'patti_host_' + cleanCode;
     const { sessionId } = getRoomScopedSession(cleanCode);
     const initialChips = getSavedPlayerChips(sessionId, cleanCode);
 
-    setConnStatus('Connecting to room ' + cleanCode + '...');
+    setConnStatus(
+      attempt > 1
+        ? `Retrying via TURN relay (Attempt ${attempt})...`
+        : `Connecting to room ${cleanCode}...`
+    );
 
-    const peer = new Peer(guestId, {
-      config: { iceServers: ICE_SERVERS },
-      debug: 1,
-      secure: true
-    });
+    const peer = new Peer(guestId, buildPeerOptions(useRelayOnly));
+    let connectedToHost = false;
 
     peer.on('open', () => {
-      const conn = peer.connect(hostPeerId, { reliable: true });
+      const conn = peer.connect(hostPeerId, { reliable: true, serialization: 'json' });
+
+      // If symmetric NAT blocks direct ICE handshake within 6.5s, auto-escalate to TURN-only relay mode
+      joinRetryTimerRef.current = setTimeout(() => {
+        if (!connectedToHost) {
+          if (!useRelayOnly && attempt === 1) {
+            setForceRelay(true);
+            initGuestPeer(cleanCode, guestId, name, true, 2);
+          } else {
+            setErrorMessage('Connection timed out on this network. Host or guest may be behind a strict firewall—try toggling Relay Mode or switching Wi-Fi/Mobile data.');
+            setConnStatus('');
+          }
+        }
+      }, 6500);
 
       conn.on('open', () => {
+        connectedToHost = true;
+        if (joinRetryTimerRef.current) {
+          clearTimeout(joinRetryTimerRef.current);
+          joinRetryTimerRef.current = null;
+        }
         connectionsRef.current[hostPeerId] = conn;
         setConnStatus('Connected! Syncing seat...');
 
@@ -500,11 +563,16 @@ export default function App() {
       });
 
       conn.on('close', () => {
-        setConnStatus('Reconnecting to host...');
+        setConnStatus('Connection closed. Reconnecting...');
       });
 
       conn.on('error', () => {
-        setErrorMessage('Failed to connect to host.');
+        if (!useRelayOnly && attempt === 1) {
+          setForceRelay(true);
+          initGuestPeer(cleanCode, guestId, name, true, 2);
+        } else {
+          setErrorMessage('Failed to establish P2P tunnel to host.');
+        }
       });
     });
 
@@ -513,8 +581,20 @@ export default function App() {
       setupMediaCall(call, call.peer);
     });
 
-    peer.on('error', () => {
-      setErrorMessage('Unable to connect to room. Check code or network.');
+    peer.on('error', (err) => {
+      if (joinRetryTimerRef.current) {
+        clearTimeout(joinRetryTimerRef.current);
+        joinRetryTimerRef.current = null;
+      }
+      if (err.type === 'peer-unavailable') {
+        setErrorMessage('Room not found or host offline. Verify the 6-character room code.');
+      } else if (!useRelayOnly && attempt === 1) {
+        setForceRelay(true);
+        initGuestPeer(cleanCode, guestId, name, true, 2);
+        return;
+      } else {
+        setErrorMessage('Unable to connect (' + err.type + '). Check network or enable Relay Mode.');
+      }
       setConnStatus('');
     });
 
@@ -544,7 +624,7 @@ export default function App() {
     setMyPlayerId(guestId);
     setIsHost(false);
 
-    initGuestPeer(cleanCode, guestId, playerName);
+    initGuestPeer(cleanCode, guestId, playerName, forceRelay, 1);
   };
 
   const handleLeaveRoom = () => {
@@ -670,7 +750,6 @@ export default function App() {
     }
 
     setPlayers(prev => {
-      // Remove disconnected player completely WITHOUT adding/spawning any bots mid-game
       const updated = prev.filter(p => p.id !== peerId);
       if (isHostRef.current) {
         let nextTurn = currentTurnRef.current;
@@ -921,7 +1000,6 @@ export default function App() {
   const executeStartGameHost = () => {
     let currentPlayers = playersRef.current;
     
-    // Check if only one player has chips left and others are spectating
     const nonSpectators = currentPlayers.filter(p => !p.isSpectator);
     if (nonSpectators.length === 1 && currentPlayers.length > 1) {
       const tableChamp = nonSpectators[0];
@@ -1071,12 +1149,12 @@ export default function App() {
   };
 
   const startGame = () => {
-    if (!isHost) return; // Only host can start games/hands
+    if (!isHost) return;
     sendActionToHostOrPeers({ type: 'START_GAME', payload: {} });
   };
 
   const resetFreshGame = () => {
-    if (!isHost) return; // Only host can reset fresh game
+    if (!isHost) return;
     sendActionToHostOrPeers({ type: 'RESET_FRESH_GAME', payload: {} });
   };
 
@@ -1100,7 +1178,6 @@ export default function App() {
       amount: finalPot
     };
 
-    // Check if only one player has chips left and others are spectating
     const nonSpectators = finalPlayers.filter(p => !p.isSpectator);
     if (nonSpectators.length === 1 && finalPlayers.length > 1) {
       const tableChamp = nonSpectators[0];
@@ -1330,7 +1407,24 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="pt-2">
+              {/* Strict NAT / Mobile Data TURN Relay Toggle */}
+              <div className="flex items-center justify-between bg-slate-950/70 border border-slate-800/80 px-3.5 py-2.5 rounded-xl">
+                <div className="flex items-center gap-2">
+                  <Wifi className="w-4 h-4 text-emerald-400" />
+                  <div>
+                    <span className="text-xs font-semibold text-slate-200 block">Strict Network Relay (TURN)</span>
+                    <span className="text-[10px] text-slate-400">Enable on mobile data or restrictive Wi-Fi</span>
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={forceRelay}
+                  onChange={e => setForceRelay(e.target.checked)}
+                  className="w-4 h-4 accent-emerald-500 rounded cursor-pointer"
+                />
+              </div>
+
+              <div className="pt-1">
                 <button 
                   onClick={createRoom}
                   className="w-full py-3 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-bold rounded-xl shadow-lg shadow-emerald-500/20 transition flex items-center justify-center gap-2"
