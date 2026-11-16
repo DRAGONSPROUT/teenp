@@ -67,6 +67,7 @@ export default function App() {
   const [gameStatus, setGameStatus] = useState('waiting');
   const [turnCount, setTurnCount] = useState(0);
   const [roundResult, setRoundResult] = useState(null);
+  const [tableWinner, setTableWinner] = useState(null);
   const [sideShowModal, setSideShowModal] = useState(null);
   const [copied, setCopied] = useState(false);
 
@@ -92,6 +93,7 @@ export default function App() {
   const gameStatusRef = useRef(gameStatus);
   const sideShowModalRef = useRef(sideShowModal);
   const roundResultRef = useRef(roundResult);
+  const tableWinnerRef = useRef(tableWinner);
   const myPlayerIdRef = useRef(myPlayerId);
   const audioMutedRef = useRef(audioMuted);
 
@@ -106,10 +108,10 @@ export default function App() {
   useEffect(() => { gameStatusRef.current = gameStatus; }, [gameStatus]);
   useEffect(() => { sideShowModalRef.current = sideShowModal; }, [sideShowModal]);
   useEffect(() => { roundResultRef.current = roundResult; }, [roundResult]);
+  useEffect(() => { tableWinnerRef.current = tableWinner; }, [tableWinner]);
   useEffect(() => { myPlayerIdRef.current = myPlayerId; }, [myPlayerId]);
   useEffect(() => { audioMutedRef.current = audioMuted; }, [audioMuted]);
 
-  // Reset custom stake on turn change
   useEffect(() => {
     setCustomStake(null);
   }, [currentTurn, gameStatus]);
@@ -381,7 +383,8 @@ export default function App() {
 
     const peer = new Peer(hostId, {
       config: { iceServers: ICE_SERVERS },
-      debug: 1
+      debug: 1,
+      secure: true
     });
 
     peer.on('open', () => {
@@ -469,7 +472,8 @@ export default function App() {
 
     const peer = new Peer(guestId, {
       config: { iceServers: ICE_SERVERS },
-      debug: 1
+      debug: 1,
+      secure: true
     });
 
     peer.on('open', () => {
@@ -560,6 +564,7 @@ export default function App() {
     setInLobby(true);
     setGameStatus('waiting');
     setRoundResult(null);
+    setTableWinner(null);
     setSideShowModal(null);
     setConnStatus('');
   };
@@ -614,6 +619,7 @@ export default function App() {
           maxStakeIsBlind: maxStakeIsBlindRef.current,
           turnCount: turnCountRef.current,
           roundResult: roundResultRef.current,
+          tableWinner: tableWinnerRef.current,
           sideShowModal: sideShowModalRef.current
         };
 
@@ -637,6 +643,7 @@ export default function App() {
       setMaxStakeIsBlind(data.payload.maxStakeIsBlind !== undefined ? data.payload.maxStakeIsBlind : true);
       setTurnCount(data.payload.turnCount);
       setRoundResult(data.payload.roundResult || null);
+      setTableWinner(data.payload.tableWinner || null);
       setSideShowModal(data.payload.sideShowModal || null);
       setInLobby(false);
       setConnStatus('Connected');
@@ -646,7 +653,7 @@ export default function App() {
           savePlayerChipsRegistry(p.sessionId || getSessionStorageItem('tp_session_id', ''), p.chips, roomCode);
         }
       });
-    } else if (['ACTION_CHAAL', 'ACTION_PACK', 'ACTION_SEE_CARDS', 'REQUEST_SIDESHOW', 'RESPOND_SIDESHOW', 'SHOW_CARDS', 'START_GAME'].includes(data.type)) {
+    } else if (['ACTION_CHAAL', 'ACTION_PACK', 'ACTION_SEE_CARDS', 'REQUEST_SIDESHOW', 'RESPOND_SIDESHOW', 'SHOW_CARDS', 'START_GAME', 'RESET_FRESH_GAME'].includes(data.type)) {
       handleActionMessage(data);
     }
   };
@@ -663,6 +670,7 @@ export default function App() {
     }
 
     setPlayers(prev => {
+      // Remove disconnected player completely WITHOUT adding/spawning any bots mid-game
       const updated = prev.filter(p => p.id !== peerId);
       if (isHostRef.current) {
         let nextTurn = currentTurnRef.current;
@@ -678,6 +686,7 @@ export default function App() {
           maxStakeIsBlind: maxStakeIsBlindRef.current,
           turnCount: turnCountRef.current,
           roundResult: roundResultRef.current,
+          tableWinner: tableWinnerRef.current,
           sideShowModal: sideShowModalRef.current
         });
       }
@@ -723,6 +732,13 @@ export default function App() {
       return;
     }
 
+    if (actionData.type === 'RESET_FRESH_GAME') {
+      if (isHostRef.current) {
+        executeResetFreshGameHost();
+      }
+      return;
+    }
+
     if (!isHostRef.current) return;
 
     let updatedPlayers = [...playersRef.current];
@@ -734,6 +750,7 @@ export default function App() {
     let newMaxStakeIsBlind = maxStakeIsBlindRef.current;
     let newGameStatus = gameStatusRef.current;
     let newRoundResult = roundResultRef.current;
+    let newTableWinner = tableWinnerRef.current;
     let newSideShowModal = sideShowModalRef.current;
 
     if (actionData.type === 'ACTION_CHAAL') {
@@ -848,6 +865,8 @@ export default function App() {
     setMaxStakeAmount(newMaxStakeAmount);
     setMaxStakeIsBlind(newMaxStakeIsBlind);
     setGameStatus(newGameStatus);
+    setRoundResult(newRoundResult);
+    setTableWinner(newTableWinner);
     setSideShowModal(newSideShowModal);
 
     broadcastState({
@@ -860,6 +879,7 @@ export default function App() {
       maxStakeIsBlind: newMaxStakeIsBlind,
       turnCount: newTurnCount,
       roundResult: newRoundResult,
+      tableWinner: newTableWinner,
       sideShowModal: newSideShowModal
     });
   };
@@ -899,17 +919,36 @@ export default function App() {
   }, [currentTurn, gameStatus, isHost, players, maxStakeAmount, maxStakeIsBlind, turnCount]);
 
   const executeStartGameHost = () => {
-    let currentPlayers = playersRef.current.filter(p => !p.isBot);
-    const neededBots = Math.max(0, maxSeats - currentPlayers.length);
+    let currentPlayers = playersRef.current;
     
-    // Ensure bots exist if needed
+    // Check if only one player has chips left and others are spectating
+    const nonSpectators = currentPlayers.filter(p => !p.isSpectator);
+    if (nonSpectators.length === 1 && currentPlayers.length > 1) {
+      const tableChamp = nonSpectators[0];
+      setTableWinner(tableChamp);
+      setGameStatus('table_ended');
+      broadcastState({
+        players: currentPlayers,
+        pot: potRef.current,
+        currentTurn: currentTurnRef.current,
+        gameStatus: 'table_ended',
+        tableWinner: tableChamp,
+        roundResult: null
+      });
+      return;
+    }
+
+    const neededBots = Math.max(0, maxSeats - currentPlayers.filter(p => !p.isBot).length);
     let allActivePlayers = [...currentPlayers];
-    const existingBots = playersRef.current.filter(p => p.isBot);
+    const existingBots = currentPlayers.filter(p => p.isBot);
 
     if (existingBots.length >= neededBots) {
-      allActivePlayers = [...currentPlayers, ...existingBots.slice(0, neededBots)];
+      allActivePlayers = [
+        ...currentPlayers.filter(p => !p.isBot),
+        ...existingBots.slice(0, neededBots)
+      ];
     } else {
-      allActivePlayers = [...currentPlayers];
+      allActivePlayers = currentPlayers.filter(p => !p.isBot);
       for (let i = existingBots.length; i < neededBots; i++) {
         allActivePlayers.push({
           id: `bot_${i}_${Date.now()}`,
@@ -955,9 +994,6 @@ export default function App() {
       };
     });
 
-    // Determine starting turn index:
-    // 1. If there is a previous winner still active/non-spectator, start with them.
-    // 2. Otherwise, find the first non-spectator player.
     let startTurnIdx = 0;
     if (roundResultRef.current && roundResultRef.current.winner) {
       const winnerId = roundResultRef.current.winner.id;
@@ -983,6 +1019,7 @@ export default function App() {
     setTurnCount(1);
     setGameStatus('playing');
     setRoundResult(null);
+    setTableWinner(null);
     setSideShowModal(null);
 
     broadcastState({
@@ -995,12 +1032,52 @@ export default function App() {
       maxStakeIsBlind: true,
       turnCount: 1,
       roundResult: null,
+      tableWinner: null,
+      sideShowModal: null
+    });
+  };
+
+  const executeResetFreshGameHost = () => {
+    let currentPlayers = playersRef.current.map(p => {
+      const freshChips = 5000;
+      savePlayerChipsRegistry(p.sessionId || p.id, freshChips, roomCode);
+      return {
+        ...p,
+        chips: freshChips,
+        cards: [],
+        isBlind: true,
+        folded: false,
+        isSpectator: false
+      };
+    });
+
+    setPlayers(currentPlayers);
+    setPot(0);
+    setCurrentTurn(0);
+    setGameStatus('lobby');
+    setRoundResult(null);
+    setTableWinner(null);
+    setSideShowModal(null);
+
+    broadcastState({
+      players: currentPlayers,
+      pot: 0,
+      currentTurn: 0,
+      gameStatus: 'lobby',
+      roundResult: null,
+      tableWinner: null,
       sideShowModal: null
     });
   };
 
   const startGame = () => {
+    if (!isHost) return; // Only host can start games/hands
     sendActionToHostOrPeers({ type: 'START_GAME', payload: {} });
+  };
+
+  const resetFreshGame = () => {
+    if (!isHost) return; // Only host can reset fresh game
+    sendActionToHostOrPeers({ type: 'RESET_FRESH_GAME', payload: {} });
   };
 
   const handleWinnerHost = (winner, updatedPlayers, finalPot) => {
@@ -1023,6 +1100,28 @@ export default function App() {
       amount: finalPot
     };
 
+    // Check if only one player has chips left and others are spectating
+    const nonSpectators = finalPlayers.filter(p => !p.isSpectator);
+    if (nonSpectators.length === 1 && finalPlayers.length > 1) {
+      const tableChamp = nonSpectators[0];
+      setPlayers(finalPlayers);
+      setGameStatus('table_ended');
+      setTableWinner(tableChamp);
+      setRoundResult(resData);
+      setSideShowModal(null);
+
+      broadcastState({
+        players: finalPlayers,
+        pot: finalPot,
+        currentTurn: currentTurnRef.current,
+        gameStatus: 'table_ended',
+        tableWinner: tableChamp,
+        roundResult: resData,
+        sideShowModal: null
+      });
+      return;
+    }
+
     setPlayers(finalPlayers);
     setGameStatus('ended');
     setRoundResult(resData);
@@ -1038,6 +1137,7 @@ export default function App() {
       maxStakeIsBlind: maxStakeIsBlindRef.current,
       turnCount: turnCountRef.current,
       roundResult: resData,
+      tableWinner: null,
       sideShowModal: null
     });
   };
@@ -1290,12 +1390,40 @@ export default function App() {
                     <span className="text-xs font-semibold text-emerald-400 uppercase tracking-wider">
                       {roundResult.handName}
                     </span>
-                    <button 
-                      onClick={startGame}
-                      className="mt-2 px-5 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold rounded-xl text-xs transition shadow-md shadow-emerald-500/20"
-                    >
-                      Play Next Hand
-                    </button>
+                    {isHost ? (
+                      <button 
+                        onClick={startGame}
+                        className="mt-2 px-5 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold rounded-xl text-xs transition shadow-md shadow-emerald-500/20"
+                      >
+                        Play Next Hand
+                      </button>
+                    ) : (
+                      <div className="mt-2 text-xs text-amber-400 font-medium">Waiting for host to start next hand...</div>
+                    )}
+                  </div>
+                )}
+
+                {gameStatus === 'table_ended' && tableWinner && (
+                  <div className="mt-3 bg-slate-950/95 border border-amber-500/60 p-5 rounded-2xl shadow-2xl backdrop-blur max-w-md flex flex-col items-center gap-2">
+                    <Crown className="w-9 h-9 text-amber-400 animate-bounce" />
+                    <h3 className="font-extrabold text-2xl text-amber-300 tracking-tight text-center">
+                      Table Winner: {tableWinner.name}!
+                    </h3>
+                    <p className="text-xs text-slate-300 text-center">
+                      All other players are spectating. {tableWinner.name} has eliminated everyone else!
+                    </p>
+                    {isHost ? (
+                      <button 
+                        onClick={resetFreshGame}
+                        className="mt-2 px-6 py-2.5 bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-400 hover:to-yellow-400 text-slate-950 font-extrabold rounded-xl text-xs transition shadow-lg shadow-amber-500/30 flex items-center gap-2"
+                      >
+                        <RotateCcw className="w-4 h-4" /> Start Fresh Game in Same Room
+                      </button>
+                    ) : (
+                      <div className="mt-2 text-xs text-amber-400 font-medium animate-pulse">
+                        Waiting for host to start a fresh game...
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -1309,12 +1437,16 @@ export default function App() {
                       Share room code <span className="font-mono font-bold text-emerald-400">{roomCode}</span> with friends. Human players connected: {players.filter(p => !p.isBot).length}/{maxSeats}
                     </p>
                   </div>
-                  <button 
-                    onClick={startGame}
-                    className="px-6 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-xl transition shadow-lg shadow-emerald-500/20"
-                  >
-                    Start Game Now
-                  </button>
+                  {isHost ? (
+                    <button 
+                      onClick={startGame}
+                      className="px-6 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-xl transition shadow-lg shadow-emerald-500/20"
+                    >
+                      Start Game Now
+                    </button>
+                  ) : (
+                    <div className="text-xs text-amber-400 font-medium">Waiting for host to start the game...</div>
+                  )}
                 </div>
               )}
 
