@@ -187,7 +187,6 @@ export default function App() {
     setSessionStorageItem('tp_room_timestamp', Date.now());
   };
 
-  // Notify host when tab/browser closes or refreshes so seat is freed immediately
   useEffect(() => {
     const handleBeforeUnload = () => {
       if (!isHostRef.current && myPlayerIdRef.current) {
@@ -464,7 +463,6 @@ export default function App() {
       setGameStatus(prev => prev === 'waiting' ? 'lobby' : prev);
       setConnStatus('Room ready. Waiting for players...');
 
-      // Host heartbeat: keep signaling alive & evict stale/disconnected guests after 8s of silence
       if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
       heartbeatTimerRef.current = setInterval(() => {
         if (peerRef.current && peerRef.current.disconnected && !peerRef.current.destroyed) {
@@ -598,7 +596,6 @@ export default function App() {
           }
         });
 
-        // Guest heartbeat so host immediately knows guest is still alive
         if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
         heartbeatTimerRef.current = setInterval(() => {
           if (conn && conn.open) {
@@ -716,7 +713,6 @@ export default function App() {
       connectionsRef.current[id] = conn;
 
       setPlayers(prev => {
-        // Prune any stale/closed human connections before evaluating room capacity
         const alivePlayers = prev.filter(p => {
           if (p.isBot || p.isHost) return true;
           if (p.id === id || (sessionId && p.sessionId === sessionId)) return false;
@@ -920,7 +916,6 @@ export default function App() {
 
       const remainingChips = actingPlayer.chips - totalBet;
 
-      // Do NOT mark isSpectator mid-hand when chips hit 0; player stays in the hand for automatic showdown
       updatedPlayers = updatedPlayers.map(p => {
         if (p.id === playerId) {
           return {
@@ -946,16 +941,11 @@ export default function App() {
         return;
       }
 
-      // If player went all-in (chips became 0), automatically reveal & show cards immediately
-      if (remainingChips === 0) {
-        handleShowdownHost(updatedPlayers, newPot);
-        return;
-      }
-
+      // Advance turn to the next active player (do NOT auto-show on the current bettor's turn)
       newTurn = getNextTurnIndexHost(newTurn, updatedPlayers);
       newTurnCount += 1;
 
-      // If the next active player has 0 chips and cannot bet further, trigger automatic showdown
+      // When the turn reaches a player who already has 0 chips (i.e. next round after going all-in), trigger showdown
       const nextPlayer = updatedPlayers[newTurn];
       if (nextPlayer && nextPlayer.chips === 0) {
         handleShowdownHost(updatedPlayers, newPot);
@@ -1003,6 +993,11 @@ export default function App() {
           return;
         }
         newTurn = getNextTurnIndexHost(newTurn, updatedPlayers);
+        const nextPlayer = updatedPlayers[newTurn];
+        if (nextPlayer && nextPlayer.chips === 0) {
+          handleShowdownHost(updatedPlayers, newPot);
+          return;
+        }
       } else if (target) {
         newSideShowModal = { requester, target };
       }
@@ -1027,6 +1022,11 @@ export default function App() {
           return;
         }
         newTurn = getNextTurnIndexHost(newTurn, updatedPlayers);
+        const nextPlayer = updatedPlayers[newTurn];
+        if (nextPlayer && nextPlayer.chips === 0) {
+          handleShowdownHost(updatedPlayers, newPot);
+          return;
+        }
       }
       newSideShowModal = null;
     } else if (actionData.type === 'SHOW_CARDS') {
@@ -1199,6 +1199,14 @@ export default function App() {
     } else {
       startTurnIdx = dealtPlayers.findIndex(p => !p.isSpectator && !p.folded);
       if (startTurnIdx === -1) startTurnIdx = 0;
+    }
+
+    // If starting player has 0 chips, trigger showdown immediately
+    if (dealtPlayers[startTurnIdx] && dealtPlayers[startTurnIdx].chips === 0) {
+      setPlayers(dealtPlayers);
+      setPot(totalInitialPot);
+      handleShowdownHost(dealtPlayers, totalInitialPot);
+      return;
     }
 
     setPlayers(dealtPlayers);
