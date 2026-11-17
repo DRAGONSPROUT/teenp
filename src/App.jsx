@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import Peer from 'peerjs';
 import { 
   Users, Volume2, VolumeX, Mic, MicOff, 
-  Eye, RefreshCw, Trophy, Crown, ArrowRight, Copy, Check, LogOut, AlertCircle, RotateCcw, Wifi
+  Eye, RefreshCw, Trophy, Crown, ArrowRight, Copy, Check, LogOut, AlertCircle, RotateCcw
 } from 'lucide-react';
 
 const HAND_RANKS = {
@@ -29,7 +29,6 @@ const SUITS = [
 const BOT_NAMES = ['Aarav', 'Vihaan', 'Ananya', 'Diya', 'Kabir', 'Rohan'];
 const STAKE_OPTIONS = [100, 200, 500, 1000];
 
-// Multi-provider TURN/STUN pool (UDP + TCP 80/443) to bypass CGNAT, Symmetric NAT, and carrier UDP blocks
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
@@ -68,7 +67,6 @@ export default function App() {
   const [myPlayerId, setMyPlayerId] = useState('');
   const [connStatus, setConnStatus] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
-  const [forceRelay, setForceRelay] = useState(false);
 
   const [players, setPlayers] = useState([]);
   const [currentTurn, setCurrentTurn] = useState(0);
@@ -93,6 +91,7 @@ export default function App() {
 
   const peerRef = useRef(null);
   const connectionsRef = useRef({});
+  const peerLastSeenRef = useRef({});
   const joinRetryTimerRef = useRef(null);
   const heartbeatTimerRef = useRef(null);
 
@@ -111,6 +110,8 @@ export default function App() {
   const tableWinnerRef = useRef(tableWinner);
   const myPlayerIdRef = useRef(myPlayerId);
   const audioMutedRef = useRef(audioMuted);
+  const maxSeatsRef = useRef(maxSeats);
+  const bootAmountRef = useRef(bootAmount);
 
   useEffect(() => { playersRef.current = players; }, [players]);
   useEffect(() => { isHostRef.current = isHost; }, [isHost]);
@@ -126,6 +127,8 @@ export default function App() {
   useEffect(() => { tableWinnerRef.current = tableWinner; }, [tableWinner]);
   useEffect(() => { myPlayerIdRef.current = myPlayerId; }, [myPlayerId]);
   useEffect(() => { audioMutedRef.current = audioMuted; }, [audioMuted]);
+  useEffect(() => { maxSeatsRef.current = maxSeats; }, [maxSeats]);
+  useEffect(() => { bootAmountRef.current = bootAmount; }, [bootAmount]);
 
   useEffect(() => {
     setCustomStake(null);
@@ -183,6 +186,22 @@ export default function App() {
     setSessionStorageItem('tp_player_chips_registry', registry);
     setSessionStorageItem('tp_room_timestamp', Date.now());
   };
+
+  // Notify host when tab/browser closes or refreshes so seat is freed immediately
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (!isHostRef.current && myPlayerIdRef.current) {
+        const hostConn = Object.values(connectionsRef.current)[0];
+        if (hostConn && hostConn.open) {
+          try {
+            hostConn.send({ type: 'LEAVE_ROOM', payload: { id: myPlayerIdRef.current } });
+          } catch (e) {}
+        }
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, []);
 
   useEffect(() => {
     const savedRoom = getSessionStorageItem('tp_active_room', null);
@@ -248,6 +267,7 @@ export default function App() {
       peerRef.current = null;
     }
     connectionsRef.current = {};
+    peerLastSeenRef.current = {};
     setMicMuted(true);
   };
 
@@ -383,7 +403,9 @@ export default function App() {
   const broadcastState = (newState) => {
     Object.values(connectionsRef.current).forEach(conn => {
       if (conn && conn.open) {
-        conn.send({ type: 'SYNC_STATE', payload: newState });
+        try {
+          conn.send({ type: 'SYNC_STATE', payload: newState });
+        } catch (e) {}
       }
     });
   };
@@ -412,7 +434,7 @@ export default function App() {
     pingInterval: 5000
   });
 
-  const initHostPeer = (formattedCode, hostId, name, useRelayOnly = forceRelay) => {
+  const initHostPeer = (formattedCode, hostId, name, useRelayOnly = false) => {
     if (peerRef.current) peerRef.current.destroy();
 
     const peer = new Peer(hostId, buildPeerOptions(useRelayOnly));
@@ -433,7 +455,7 @@ export default function App() {
           cards: [],
           isBlind: true,
           folded: false,
-          isSpectator: initialChips < bootAmount
+          isSpectator: initialChips < bootAmountRef.current
         };
         return [initialHostPlayer];
       });
@@ -442,26 +464,47 @@ export default function App() {
       setGameStatus(prev => prev === 'waiting' ? 'lobby' : prev);
       setConnStatus('Room ready. Waiting for players...');
 
-      // Keep signaling WebSocket alive on mobile/carrier NATs
+      // Host heartbeat: keep signaling alive & evict stale/disconnected guests after 8s of silence
       if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
       heartbeatTimerRef.current = setInterval(() => {
         if (peerRef.current && peerRef.current.disconnected && !peerRef.current.destroyed) {
           try { peerRef.current.reconnect(); } catch (e) {}
         }
-      }, 10000);
+
+        const now = Date.now();
+        const activeHumans = playersRef.current.filter(p => !p.isBot && !p.isHost);
+        activeHumans.forEach(guest => {
+          const conn = connectionsRef.current[guest.id];
+          const lastSeen = peerLastSeenRef.current[guest.id] || 0;
+          const isClosed = !conn || !conn.open || (conn.peerConnection && ['disconnected', 'failed', 'closed'].includes(conn.peerConnection.iceConnectionState));
+
+          if (isClosed || (lastSeen > 0 && now - lastSeen > 8500)) {
+            removeDisconnectedPeer(guest.id);
+          } else if (conn && conn.open) {
+            try { conn.send({ type: 'PING', ts: now }); } catch (e) {}
+          }
+        });
+      }, 3000);
     });
 
     peer.on('connection', (conn) => {
       conn.on('open', () => {
         connectionsRef.current[conn.peer] = conn;
+        peerLastSeenRef.current[conn.peer] = Date.now();
       });
 
       conn.on('data', (data) => {
+        peerLastSeenRef.current[conn.peer] = Date.now();
         handleIncomingData(data, conn);
       });
 
-      conn.on('close', () => {});
-      conn.on('error', () => {});
+      conn.on('close', () => {
+        removeDisconnectedPeer(conn.peer);
+      });
+
+      conn.on('error', () => {
+        removeDisconnectedPeer(conn.peer);
+      });
     });
 
     peer.on('call', (call) => {
@@ -479,7 +522,7 @@ export default function App() {
       if (err.type === 'unavailable-id') {
         setErrorMessage('Room code collision. Click Create again.');
       } else {
-        setErrorMessage('Network error (' + err.type + '). Try enabling Relay Mode.');
+        setErrorMessage('Network error (' + err.type + '). Please check your internet connection.');
       }
       setConnStatus('');
     });
@@ -502,10 +545,10 @@ export default function App() {
     setMyPlayerId(hostId);
     setConnStatus('Initializing peer room...');
 
-    initHostPeer(formattedCode, hostId, playerName, forceRelay);
+    initHostPeer(formattedCode, hostId, playerName, false);
   };
 
-  const initGuestPeer = (cleanCode, guestId, name, useRelayOnly = forceRelay, attempt = 1) => {
+  const initGuestPeer = (cleanCode, guestId, name, useRelayOnly = false, attempt = 1) => {
     if (peerRef.current) peerRef.current.destroy();
 
     const hostPeerId = 'patti_host_' + cleanCode;
@@ -524,14 +567,12 @@ export default function App() {
     peer.on('open', () => {
       const conn = peer.connect(hostPeerId, { reliable: true, serialization: 'json' });
 
-      // If symmetric NAT blocks direct ICE handshake within 6.5s, auto-escalate to TURN-only relay mode
       joinRetryTimerRef.current = setTimeout(() => {
         if (!connectedToHost) {
           if (!useRelayOnly && attempt === 1) {
-            setForceRelay(true);
             initGuestPeer(cleanCode, guestId, name, true, 2);
           } else {
-            setErrorMessage('Connection timed out on this network. Host or guest may be behind a strict firewall—try toggling Relay Mode or switching Wi-Fi/Mobile data.');
+            setErrorMessage('Connection timed out on this network. Please check your connection and try again.');
             setConnStatus('');
           }
         }
@@ -556,19 +597,31 @@ export default function App() {
             chips: initialChips
           }
         });
+
+        // Guest heartbeat so host immediately knows guest is still alive
+        if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
+        heartbeatTimerRef.current = setInterval(() => {
+          if (conn && conn.open) {
+            try { conn.send({ type: 'PONG', id: guestId, ts: Date.now() }); } catch (e) {}
+          }
+        }, 2500);
       });
 
       conn.on('data', (data) => {
+        if (data && data.type === 'PING') {
+          try { conn.send({ type: 'PONG', id: guestId, ts: Date.now() }); } catch (e) {}
+          return;
+        }
         handleIncomingData(data, conn);
       });
 
       conn.on('close', () => {
-        setConnStatus('Connection closed. Reconnecting...');
+        if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
+        setConnStatus('Disconnected from host. Reconnecting...');
       });
 
       conn.on('error', () => {
         if (!useRelayOnly && attempt === 1) {
-          setForceRelay(true);
           initGuestPeer(cleanCode, guestId, name, true, 2);
         } else {
           setErrorMessage('Failed to establish P2P tunnel to host.');
@@ -589,11 +642,10 @@ export default function App() {
       if (err.type === 'peer-unavailable') {
         setErrorMessage('Room not found or host offline. Verify the 6-character room code.');
       } else if (!useRelayOnly && attempt === 1) {
-        setForceRelay(true);
         initGuestPeer(cleanCode, guestId, name, true, 2);
         return;
       } else {
-        setErrorMessage('Unable to connect (' + err.type + '). Check network or enable Relay Mode.');
+        setErrorMessage('Unable to connect (' + err.type + '). Check your network connection.');
       }
       setConnStatus('');
     });
@@ -624,7 +676,7 @@ export default function App() {
     setMyPlayerId(guestId);
     setIsHost(false);
 
-    initGuestPeer(cleanCode, guestId, playerName, forceRelay, 1);
+    initGuestPeer(cleanCode, guestId, playerName, false, 1);
   };
 
   const handleLeaveRoom = () => {
@@ -652,28 +704,38 @@ export default function App() {
   const handleIncomingData = (data, conn) => {
     if (!data || !data.type) return;
 
+    if (data.type === 'PONG' && isHostRef.current) {
+      if (data.id) peerLastSeenRef.current[data.id] = Date.now();
+      return;
+    }
+
     if (data.type === 'JOIN_REQUEST' && isHostRef.current) {
       const { id, sessionId, roomCode: reqRoomCode, name, chips } = data.payload;
       const targetRoom = reqRoomCode || roomCode;
+      peerLastSeenRef.current[id] = Date.now();
+      connectionsRef.current[id] = conn;
 
       setPlayers(prev => {
-        const currentHumans = prev.filter(p => !p.isBot);
+        // Prune any stale/closed human connections before evaluating room capacity
+        const alivePlayers = prev.filter(p => {
+          if (p.isBot || p.isHost) return true;
+          if (p.id === id || (sessionId && p.sessionId === sessionId)) return false;
+          const existingConn = connectionsRef.current[p.id];
+          return existingConn && existingConn.open;
+        });
+
+        const currentHumans = alivePlayers.filter(p => !p.isBot);
         const existingPlayer = prev.find(p => p.id === id || (sessionId && p.sessionId === sessionId));
 
-        if (!existingPlayer && currentHumans.length >= maxSeats) {
+        if (currentHumans.length >= maxSeatsRef.current) {
           try {
             conn.send({ type: 'ROOM_FULL', payload: { message: 'Room is full! Maximum human player capacity reached.' } });
           } catch (e) {}
-          return prev;
+          return alivePlayers;
         }
 
-        const filtered = prev.filter(p => {
-          if (p.id === id) return false;
-          if (sessionId && p.sessionId === sessionId) return false;
-          return true;
-        });
-
         const restoredChips = chips !== undefined ? chips : getSavedPlayerChips(sessionId, targetRoom);
+        const isPlayingNow = gameStatusRef.current === 'playing';
         const newPlayer = {
           id,
           sessionId,
@@ -683,11 +745,11 @@ export default function App() {
           chips: restoredChips,
           cards: existingPlayer ? existingPlayer.cards : [],
           isBlind: existingPlayer ? existingPlayer.isBlind : true,
-          folded: existingPlayer ? existingPlayer.folded : false,
-          isSpectator: restoredChips < bootAmount
+          folded: existingPlayer ? existingPlayer.folded : isPlayingNow,
+          isSpectator: restoredChips < bootAmountRef.current || (isPlayingNow && !existingPlayer)
         };
 
-        const updated = [...filtered, newPlayer];
+        const updated = [...alivePlayers, newPlayer];
 
         const statePayload = {
           players: updated,
@@ -739,7 +801,13 @@ export default function App() {
   };
 
   const removeDisconnectedPeer = (peerId) => {
-    delete connectionsRef.current[peerId];
+    if (!peerId) return;
+    if (connectionsRef.current[peerId]) {
+      try { connectionsRef.current[peerId].close(); } catch (e) {}
+      delete connectionsRef.current[peerId];
+    }
+    delete peerLastSeenRef.current[peerId];
+
     if (mediaCallsRef.current[peerId]) {
       try { mediaCallsRef.current[peerId].close(); } catch (e) {}
       delete mediaCallsRef.current[peerId];
@@ -750,10 +818,21 @@ export default function App() {
     }
 
     setPlayers(prev => {
+      if (!prev.some(p => p.id === peerId)) return prev;
       const updated = prev.filter(p => p.id !== peerId);
+
       if (isHostRef.current) {
+        const active = updated.filter(p => !p.folded && !p.isSpectator);
+        if (gameStatusRef.current === 'playing' && active.length === 1) {
+          handleWinnerHost(active[0], updated, potRef.current);
+          return updated;
+        }
+
         let nextTurn = currentTurnRef.current;
         if (nextTurn >= updated.length) nextTurn = 0;
+        if (updated.length > 0 && (updated[nextTurn]?.folded || updated[nextTurn]?.isSpectator)) {
+          nextTurn = getNextTurnIndexHost(nextTurn, updated);
+        }
 
         broadcastState({
           players: updated,
@@ -839,13 +918,14 @@ export default function App() {
       
       if (!actingPlayer || actingPlayer.chips < totalBet || totalBet < minRequired || actingPlayer.isSpectator) return;
 
+      const remainingChips = actingPlayer.chips - totalBet;
+
+      // Do NOT mark isSpectator mid-hand when chips hit 0; player stays in the hand for automatic showdown
       updatedPlayers = updatedPlayers.map(p => {
         if (p.id === playerId) {
-          const newChips = p.chips - totalBet;
           return {
             ...p,
-            chips: newChips,
-            isSpectator: newChips < bootAmount
+            chips: remainingChips
           };
         }
         return p;
@@ -858,7 +938,7 @@ export default function App() {
       }
       newStake = totalBet;
 
-      savePlayerChipsRegistry(actingPlayer.sessionId || actingPlayer.id, actingPlayer.chips - totalBet, roomCode);
+      savePlayerChipsRegistry(actingPlayer.sessionId || actingPlayer.id, remainingChips, roomCode);
 
       const active = updatedPlayers.filter(p => !p.folded && !p.isSpectator);
       if (active.length === 1) {
@@ -866,8 +946,21 @@ export default function App() {
         return;
       }
 
+      // If player went all-in (chips became 0), automatically reveal & show cards immediately
+      if (remainingChips === 0) {
+        handleShowdownHost(updatedPlayers, newPot);
+        return;
+      }
+
       newTurn = getNextTurnIndexHost(newTurn, updatedPlayers);
       newTurnCount += 1;
+
+      // If the next active player has 0 chips and cannot bet further, trigger automatic showdown
+      const nextPlayer = updatedPlayers[newTurn];
+      if (nextPlayer && nextPlayer.chips === 0) {
+        handleShowdownHost(updatedPlayers, newPot);
+        return;
+      }
     } else if (actionData.type === 'ACTION_PACK') {
       const { playerId } = actionData.payload;
       updatedPlayers = updatedPlayers.map(p => p.id === playerId ? { ...p, folded: true } : p);
@@ -879,6 +972,11 @@ export default function App() {
       }
 
       newTurn = getNextTurnIndexHost(newTurn, updatedPlayers);
+      const nextPlayer = updatedPlayers[newTurn];
+      if (nextPlayer && nextPlayer.chips === 0) {
+        handleShowdownHost(updatedPlayers, newPot);
+        return;
+      }
     } else if (actionData.type === 'ACTION_SEE_CARDS') {
       const { playerId } = actionData.payload;
       updatedPlayers = updatedPlayers.map(p => p.id === playerId ? { ...p, isBlind: false } : p);
@@ -980,7 +1078,9 @@ export default function App() {
       const botTimer = setTimeout(() => {
         const requiredAmount = getBaseRequiredBetForPlayer(currentPlayer, maxStakeAmount, maxStakeIsBlind);
 
-        if (currentPlayer.chips < requiredAmount || (Math.random() < 0.15 && turnCount > 2)) {
+        if (currentPlayer.chips === 0) {
+          handleShowdownHost(playersRef.current, potRef.current);
+        } else if (currentPlayer.chips < requiredAmount || (Math.random() < 0.15 && turnCount > 2)) {
           handleActionMessage({
             type: 'ACTION_PACK',
             payload: { playerId: currentPlayer.id }
@@ -1000,13 +1100,18 @@ export default function App() {
   const executeStartGameHost = () => {
     let currentPlayers = playersRef.current;
     
-    const nonSpectators = currentPlayers.filter(p => !p.isSpectator);
+    const nonSpectators = currentPlayers.filter(p => p.chips >= bootAmountRef.current);
     if (nonSpectators.length === 1 && currentPlayers.length > 1) {
       const tableChamp = nonSpectators[0];
+      const updatedSpecs = currentPlayers.map(p => ({
+        ...p,
+        isSpectator: p.chips < bootAmountRef.current
+      }));
+      setPlayers(updatedSpecs);
       setTableWinner(tableChamp);
       setGameStatus('table_ended');
       broadcastState({
-        players: currentPlayers,
+        players: updatedSpecs,
         pot: potRef.current,
         currentTurn: currentTurnRef.current,
         gameStatus: 'table_ended',
@@ -1016,7 +1121,7 @@ export default function App() {
       return;
     }
 
-    const neededBots = Math.max(0, maxSeats - currentPlayers.filter(p => !p.isBot).length);
+    const neededBots = Math.max(0, maxSeatsRef.current - currentPlayers.filter(p => !p.isBot).length);
     let allActivePlayers = [...currentPlayers];
     const existingBots = currentPlayers.filter(p => p.isBot);
 
@@ -1047,7 +1152,7 @@ export default function App() {
     let totalInitialPot = 0;
 
     const dealtPlayers = allActivePlayers.map(p => {
-      const isSpectator = p.chips < bootAmount;
+      const isSpectator = p.chips < bootAmountRef.current;
       if (isSpectator) {
         return {
           ...p,
@@ -1058,8 +1163,8 @@ export default function App() {
         };
       }
 
-      totalInitialPot += bootAmount;
-      const newChips = p.chips - bootAmount;
+      totalInitialPot += bootAmountRef.current;
+      const newChips = p.chips - bootAmountRef.current;
       savePlayerChipsRegistry(p.sessionId || p.id, newChips, roomCode);
 
       return {
@@ -1071,6 +1176,15 @@ export default function App() {
         isSpectator: false
       };
     });
+
+    // If everyone went all-in on the boot ante (all active players now have 0 chips), auto-show immediately
+    const activeAfterBoot = dealtPlayers.filter(p => !p.folded && !p.isSpectator);
+    if (activeAfterBoot.length > 0 && activeAfterBoot.every(p => p.chips === 0)) {
+      setPlayers(dealtPlayers);
+      setPot(totalInitialPot);
+      handleShowdownHost(dealtPlayers, totalInitialPot);
+      return;
+    }
 
     let startTurnIdx = 0;
     if (roundResultRef.current && roundResultRef.current.winner) {
@@ -1089,8 +1203,8 @@ export default function App() {
 
     setPlayers(dealtPlayers);
     setPot(totalInitialPot);
-    setCurrentStake(bootAmount);
-    setMaxStakeAmount(bootAmount);
+    setCurrentStake(bootAmountRef.current);
+    setMaxStakeAmount(bootAmountRef.current);
     setMaxStakeIsBlind(true);
     setCustomStake(null);
     setCurrentTurn(startTurnIdx);
@@ -1105,8 +1219,8 @@ export default function App() {
       pot: totalInitialPot,
       currentTurn: startTurnIdx,
       gameStatus: 'playing',
-      currentStake: bootAmount,
-      maxStakeAmount: bootAmount,
+      currentStake: bootAmountRef.current,
+      maxStakeAmount: bootAmountRef.current,
       maxStakeIsBlind: true,
       turnCount: 1,
       roundResult: null,
@@ -1168,7 +1282,7 @@ export default function App() {
         ...p,
         isBlind: false,
         chips: newChips,
-        isSpectator: newChips < bootAmount
+        isSpectator: newChips < bootAmountRef.current
       };
     });
     
@@ -1407,24 +1521,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Strict NAT / Mobile Data TURN Relay Toggle */}
-              <div className="flex items-center justify-between bg-slate-950/70 border border-slate-800/80 px-3.5 py-2.5 rounded-xl">
-                <div className="flex items-center gap-2">
-                  <Wifi className="w-4 h-4 text-emerald-400" />
-                  <div>
-                    <span className="text-xs font-semibold text-slate-200 block">Strict Network Relay (TURN)</span>
-                    <span className="text-[10px] text-slate-400">Enable on mobile data or restrictive Wi-Fi</span>
-                  </div>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={forceRelay}
-                  onChange={e => setForceRelay(e.target.checked)}
-                  className="w-4 h-4 accent-emerald-500 rounded cursor-pointer"
-                />
-              </div>
-
-              <div className="pt-1">
+              <div className="pt-2">
                 <button 
                   onClick={createRoom}
                   className="w-full py-3 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-bold rounded-xl shadow-lg shadow-emerald-500/20 transition flex items-center justify-center gap-2"
@@ -1553,7 +1650,7 @@ export default function App() {
 
                   const isCurrentTurn = gameStatus === 'playing' && currentTurn === idx;
                   const isUser = player.id === myPlayerId;
-                  const revealCard = (isUser && !player.isBlind) || gameStatus === 'ended';
+                  const revealCard = (isUser && !player.isBlind) || gameStatus === 'ended' || gameStatus === 'table_ended';
 
                   const minRequiredBet = getBaseRequiredBetForPlayer(player, maxStakeAmount, maxStakeIsBlind);
                   const chaalBetAmount = getEffectiveChaalAmount(player, maxStakeAmount, maxStakeIsBlind);
@@ -1606,7 +1703,7 @@ export default function App() {
                         )}
                       </div>
 
-                      {(gameStatus === 'playing' || gameStatus === 'ended') && player.cards && player.cards.length > 0 && !player.isSpectator && (
+                      {(gameStatus === 'playing' || gameStatus === 'ended' || gameStatus === 'table_ended') && player.cards && player.cards.length > 0 && !player.isSpectator && (
                         <div className="flex gap-1 mt-2">
                           {player.cards.map((card, cIdx) => (
                             <div 
