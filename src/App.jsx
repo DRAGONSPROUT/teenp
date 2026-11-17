@@ -57,12 +57,52 @@ const ICE_SERVERS = [
   }
 ];
 
+const readLocalStore = (key, fallback) => {
+  try {
+    const val = localStorage.getItem(key);
+    return val !== null ? JSON.parse(val) : fallback;
+  } catch (e) {
+    return fallback;
+  }
+};
+
+const writeLocalStore = (key, val) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(val));
+  } catch (e) {}
+};
+
+const getSessionStorageItem = (key, fallback) => {
+  try {
+    const val = sessionStorage.getItem(key);
+    return val !== null ? JSON.parse(val) : fallback;
+  } catch (e) {
+    return fallback;
+  }
+};
+
+const setSessionStorageItem = (key, val) => {
+  try {
+    sessionStorage.setItem(key, JSON.stringify(val));
+  } catch (e) {}
+};
+
+// Persistent browser-level player identity so leaving a room or reopening never loses identity
+const getOrCreatePersistentSessionId = () => {
+  let sid = readLocalStore('tp_persistent_sid', null);
+  if (!sid) {
+    sid = 'sid_' + Math.random().toString(36).substring(2, 11) + '_' + Date.now().toString(36);
+    writeLocalStore('tp_persistent_sid', sid);
+  }
+  return sid;
+};
+
 export default function App() {
   const [inLobby, setInLobby] = useState(true);
   const [roomCode, setRoomCode] = useState('');
   const [bootAmount, setBootAmount] = useState(100);
   const [maxSeats, setMaxSeats] = useState(3);
-  const [playerName, setPlayerName] = useState('Player 1');
+  const [playerName, setPlayerName] = useState(() => readLocalStore('tp_saved_player_name', 'Player 1'));
   const [isHost, setIsHost] = useState(false);
   const [myPlayerId, setMyPlayerId] = useState('');
   const [connStatus, setConnStatus] = useState('');
@@ -95,6 +135,9 @@ export default function App() {
   const joinRetryTimerRef = useRef(null);
   const heartbeatTimerRef = useRef(null);
 
+  // Authoritative Host Room Ledger: maps sessionId -> { name, chips } so leave + rejoin preserves both
+  const hostRoomLedgerRef = useRef({});
+
   // Real-time Master Refs
   const playersRef = useRef(players);
   const isHostRef = useRef(isHost);
@@ -112,6 +155,7 @@ export default function App() {
   const audioMutedRef = useRef(audioMuted);
   const maxSeatsRef = useRef(maxSeats);
   const bootAmountRef = useRef(bootAmount);
+  const roomCodeRef = useRef(roomCode);
 
   useEffect(() => { playersRef.current = players; }, [players]);
   useEffect(() => { isHostRef.current = isHost; }, [isHost]);
@@ -129,62 +173,65 @@ export default function App() {
   useEffect(() => { audioMutedRef.current = audioMuted; }, [audioMuted]);
   useEffect(() => { maxSeatsRef.current = maxSeats; }, [maxSeats]);
   useEffect(() => { bootAmountRef.current = bootAmount; }, [bootAmount]);
+  useEffect(() => { roomCodeRef.current = roomCode; }, [roomCode]);
 
   useEffect(() => {
     setCustomStake(null);
   }, [currentTurn, gameStatus]);
 
-  const getSessionStorageItem = (key, fallback) => {
-    try {
-      const val = sessionStorage.getItem(key);
-      return val !== null ? JSON.parse(val) : fallback;
-    } catch (e) {
-      return fallback;
+  // Persist player's chosen display name whenever edited
+  useEffect(() => {
+    if (playerName && playerName.trim()) {
+      writeLocalStore('tp_saved_player_name', playerName);
     }
+  }, [playerName]);
+
+  // Room-scoped persistent ledger in localStorage (survives Leave Room, reloads, and disconnects)
+  const getRoomLedgerKey = (targetRoomCode) => {
+    const cleanRoom = (targetRoomCode || '').trim().toUpperCase();
+    return `tp_room_ledger_${cleanRoom}`;
   };
 
-  const setSessionStorageItem = (key, val) => {
-    try {
-      sessionStorage.setItem(key, JSON.stringify(val));
-    } catch (e) {}
-  };
-
-  const getRoomScopedSession = (targetRoomCode) => {
-    const cleanRoom = targetRoomCode ? targetRoomCode.trim().toUpperCase() : '';
-    const lastRoom = getSessionStorageItem('tp_last_active_room', '');
-    const lastTimestamp = getSessionStorageItem('tp_room_timestamp', 0);
-    const now = Date.now();
-    const TWO_MINUTES_MS = 2 * 60 * 1000;
-
-    let sessionId = getSessionStorageItem('tp_session_id', null);
-    let registry = getSessionStorageItem('tp_player_chips_registry', {});
-
-    const isSameRoomWithinThreshold = cleanRoom && lastRoom === cleanRoom && (now - lastTimestamp < TWO_MINUTES_MS);
-
-    if (!isSameRoomWithinThreshold || !sessionId) {
-      sessionId = 'sid_' + Math.random().toString(36).substring(2, 11);
-      registry = {};
-      setSessionStorageItem('tp_session_id', sessionId);
-      setSessionStorageItem('tp_player_chips_registry', registry);
+  const getSavedPlayerRecord = (sessionId, targetRoomCode, fallbackName = 'Player') => {
+    const cleanRoom = (targetRoomCode || '').trim().toUpperCase();
+    if (!cleanRoom || !sessionId) {
+      return { name: fallbackName, chips: 5000, exists: false };
     }
-
-    setSessionStorageItem('tp_last_active_room', cleanRoom);
-    setSessionStorageItem('tp_room_timestamp', now);
-
-    return { sessionId, registry };
+    const ledger = readLocalStore(getRoomLedgerKey(cleanRoom), {});
+    const record = ledger[sessionId];
+    if (record && typeof record.chips === 'number') {
+      return {
+        name: record.name || fallbackName,
+        chips: record.chips,
+        exists: true
+      };
+    }
+    return { name: fallbackName, chips: 5000, exists: false };
   };
 
-  const getSavedPlayerChips = (sessionId, targetRoomCode) => {
-    const { registry } = getRoomScopedSession(targetRoomCode);
-    return registry[sessionId] !== undefined ? registry[sessionId] : 5000;
-  };
+  const savePlayerRecord = (sessionId, name, chips, targetRoomCode) => {
+    const cleanRoom = (targetRoomCode || '').trim().toUpperCase();
+    if (!cleanRoom || !sessionId) return;
 
-  const savePlayerChipsRegistry = (sessionId, chips, targetRoomCode) => {
-    const { sessionId: activeSid, registry } = getRoomScopedSession(targetRoomCode);
-    const sidToUse = sessionId || activeSid;
-    registry[sidToUse] = chips;
-    setSessionStorageItem('tp_player_chips_registry', registry);
-    setSessionStorageItem('tp_room_timestamp', Date.now());
+    const ledgerKey = getRoomLedgerKey(cleanRoom);
+    const ledger = readLocalStore(ledgerKey, {});
+    const existing = ledger[sessionId] || {};
+    const resolvedName = (name && name.trim()) ? name.trim() : (existing.name || 'Player');
+    const resolvedChips = typeof chips === 'number' ? chips : (typeof existing.chips === 'number' ? existing.chips : 5000);
+
+    ledger[sessionId] = {
+      name: resolvedName,
+      chips: resolvedChips,
+      updatedAt: Date.now()
+    };
+    writeLocalStore(ledgerKey, ledger);
+
+    if (isHostRef.current) {
+      hostRoomLedgerRef.current[sessionId] = {
+        name: resolvedName,
+        chips: resolvedChips
+      };
+    }
   };
 
   useEffect(() => {
@@ -204,7 +251,7 @@ export default function App() {
 
   useEffect(() => {
     const savedRoom = getSessionStorageItem('tp_active_room', null);
-    const savedName = getSessionStorageItem('tp_player_name', 'Player 1');
+    const savedName = getSessionStorageItem('tp_player_name', readLocalStore('tp_saved_player_name', 'Player 1'));
     const savedIsHost = getSessionStorageItem('tp_is_host', false);
     const savedMyId = getSessionStorageItem('tp_my_player_id', null);
     const lastTimestamp = getSessionStorageItem('tp_room_timestamp', 0);
@@ -439,15 +486,22 @@ export default function App() {
     const peer = new Peer(hostId, buildPeerOptions(useRelayOnly));
 
     peer.on('open', () => {
-      const { sessionId } = getRoomScopedSession(formattedCode);
-      const initialChips = getSavedPlayerChips(sessionId, formattedCode);
+      const sessionId = getOrCreatePersistentSessionId();
+      const saved = getSavedPlayerRecord(sessionId, formattedCode, name.trim() || 'Host');
+      const resolvedName = (name && name.trim()) ? name.trim() : saved.name;
+      const initialChips = saved.chips;
+
+      // Hydrate host ledger from localStorage for this room code
+      const storedLedger = readLocalStore(getRoomLedgerKey(formattedCode), {});
+      hostRoomLedgerRef.current = { ...storedLedger };
+      savePlayerRecord(sessionId, resolvedName, initialChips, formattedCode);
 
       setPlayers(prev => {
         if (prev.some(p => p.id === hostId)) return prev;
         const initialHostPlayer = {
           id: hostId,
           sessionId,
-          name: name.trim() || 'Host',
+          name: resolvedName,
           isHost: true,
           isBot: false,
           chips: initialChips,
@@ -536,8 +590,6 @@ export default function App() {
     const formattedCode = sanitizeCode(rawCode);
     const hostId = 'patti_host_' + formattedCode;
 
-    getRoomScopedSession(formattedCode);
-
     setRoomCode(formattedCode);
     setIsHost(true);
     setMyPlayerId(hostId);
@@ -550,8 +602,12 @@ export default function App() {
     if (peerRef.current) peerRef.current.destroy();
 
     const hostPeerId = 'patti_host_' + cleanCode;
-    const { sessionId } = getRoomScopedSession(cleanCode);
-    const initialChips = getSavedPlayerChips(sessionId, cleanCode);
+    const sessionId = getOrCreatePersistentSessionId();
+    const saved = getSavedPlayerRecord(sessionId, cleanCode, name.trim() || 'Player');
+    const resolvedName = (name && name.trim() && name.trim() !== 'Player 1')
+      ? name.trim()
+      : (saved.exists ? saved.name : (name.trim() || 'Player'));
+    const initialChips = saved.chips;
 
     setConnStatus(
       attempt > 1
@@ -568,7 +624,7 @@ export default function App() {
       joinRetryTimerRef.current = setTimeout(() => {
         if (!connectedToHost) {
           if (!useRelayOnly && attempt === 1) {
-            initGuestPeer(cleanCode, guestId, name, true, 2);
+            initGuestPeer(cleanCode, guestId, resolvedName, true, 2);
           } else {
             setErrorMessage('Connection timed out on this network. Please check your connection and try again.');
             setConnStatus('');
@@ -591,8 +647,9 @@ export default function App() {
             id: guestId,
             sessionId,
             roomCode: cleanCode,
-            name: name.trim() || 'Player',
-            chips: initialChips
+            name: resolvedName,
+            chips: initialChips,
+            hasSavedRecord: saved.exists
           }
         });
 
@@ -619,7 +676,7 @@ export default function App() {
 
       conn.on('error', () => {
         if (!useRelayOnly && attempt === 1) {
-          initGuestPeer(cleanCode, guestId, name, true, 2);
+          initGuestPeer(cleanCode, guestId, resolvedName, true, 2);
         } else {
           setErrorMessage('Failed to establish P2P tunnel to host.');
         }
@@ -639,7 +696,7 @@ export default function App() {
       if (err.type === 'peer-unavailable') {
         setErrorMessage('Room not found or host offline. Verify the 6-character room code.');
       } else if (!useRelayOnly && attempt === 1) {
-        initGuestPeer(cleanCode, guestId, name, true, 2);
+        initGuestPeer(cleanCode, guestId, resolvedName, true, 2);
         return;
       } else {
         setErrorMessage('Unable to connect (' + err.type + '). Check your network connection.');
@@ -665,9 +722,7 @@ export default function App() {
 
     cleanupAudioAndPeers();
 
-    getRoomScopedSession(cleanCode);
-
-    const sessionId = getSessionStorageItem('tp_session_id', '');
+    const sessionId = getOrCreatePersistentSessionId();
     const guestId = 'patti_guest_' + sessionId + '_' + Math.random().toString(36).substring(2, 5);
 
     setMyPlayerId(guestId);
@@ -677,6 +732,13 @@ export default function App() {
   };
 
   const handleLeaveRoom = () => {
+    // Save current player's exact chips & name into room ledger before leaving
+    const me = playersRef.current.find(p => p.id === myPlayerIdRef.current);
+    if (me && roomCodeRef.current) {
+      const sid = me.sessionId || getOrCreatePersistentSessionId();
+      savePlayerRecord(sid, me.name, me.chips, roomCodeRef.current);
+    }
+
     if (!isHostRef.current) {
       const hostConn = Object.values(connectionsRef.current)[0];
       if (hostConn && hostConn.open) {
@@ -707,8 +769,8 @@ export default function App() {
     }
 
     if (data.type === 'JOIN_REQUEST' && isHostRef.current) {
-      const { id, sessionId, roomCode: reqRoomCode, name, chips } = data.payload;
-      const targetRoom = reqRoomCode || roomCode;
+      const { id, sessionId, roomCode: reqRoomCode, name, chips, hasSavedRecord } = data.payload;
+      const targetRoom = reqRoomCode || roomCodeRef.current;
       peerLastSeenRef.current[id] = Date.now();
       connectionsRef.current[id] = conn;
 
@@ -730,12 +792,38 @@ export default function App() {
           return alivePlayers;
         }
 
-        const restoredChips = chips !== undefined ? chips : getSavedPlayerChips(sessionId, targetRoom);
+        // Priority for restoring balance & name on rejoin:
+        // 1. Authoritative host room ledger for this sessionId
+        // 2. Guest's local room ledger record if host ledger didn't have it
+        // 3. Fallback to provided name / 5000 chips
+        const hostLedgerEntry = sessionId ? hostRoomLedgerRef.current[sessionId] : null;
+        const localLedgerEntry = getSavedPlayerRecord(sessionId, targetRoom, name);
+
+        let restoredChips = 5000;
+        if (hostLedgerEntry && typeof hostLedgerEntry.chips === 'number') {
+          restoredChips = hostLedgerEntry.chips;
+        } else if (localLedgerEntry.exists) {
+          restoredChips = localLedgerEntry.chips;
+        } else if (hasSavedRecord && typeof chips === 'number') {
+          restoredChips = chips;
+        } else if (typeof chips === 'number') {
+          restoredChips = chips;
+        }
+
+        let restoredName = (name && name.trim()) ? name.trim() : 'Player';
+        if (hostLedgerEntry && hostLedgerEntry.name && (!name || name.trim() === 'Player 1' || name.trim() === 'Player')) {
+          restoredName = hostLedgerEntry.name;
+        } else if (localLedgerEntry.exists && (!name || name.trim() === 'Player 1' || name.trim() === 'Player')) {
+          restoredName = localLedgerEntry.name;
+        }
+
+        savePlayerRecord(sessionId, restoredName, restoredChips, targetRoom);
+
         const isPlayingNow = gameStatusRef.current === 'playing';
         const newPlayer = {
           id,
           sessionId,
-          name,
+          name: restoredName,
           isHost: false,
           isBot: false,
           chips: restoredChips,
@@ -786,9 +874,17 @@ export default function App() {
       setInLobby(false);
       setConnStatus('Connected');
 
+      const mySid = getOrCreatePersistentSessionId();
       data.payload.players.forEach(p => {
-        if (p.id === myPlayerIdRef.current || p.sessionId === getSessionStorageItem('tp_session_id', '')) {
-          savePlayerChipsRegistry(p.sessionId || getSessionStorageItem('tp_session_id', ''), p.chips, roomCode);
+        if (p.sessionId) {
+          savePlayerRecord(p.sessionId, p.name, p.chips, roomCodeRef.current);
+        }
+        if (p.id === myPlayerIdRef.current || p.sessionId === mySid) {
+          if (p.name && p.name !== playerName) {
+            setPlayerName(p.name);
+            writeLocalStore('tp_saved_player_name', p.name);
+          }
+          savePlayerRecord(mySid, p.name, p.chips, roomCodeRef.current);
         }
       });
     } else if (['ACTION_CHAAL', 'ACTION_PACK', 'ACTION_SEE_CARDS', 'REQUEST_SIDESHOW', 'RESPOND_SIDESHOW', 'SHOW_CARDS', 'START_GAME', 'RESET_FRESH_GAME'].includes(data.type)) {
@@ -814,7 +910,14 @@ export default function App() {
     }
 
     setPlayers(prev => {
-      if (!prev.some(p => p.id === peerId)) return prev;
+      const leavingPlayer = prev.find(p => p.id === peerId);
+      if (!leavingPlayer) return prev;
+
+      // Snapshot the leaving player's latest name and chip balance into the room ledger before removing from active seat
+      if (leavingPlayer.sessionId && roomCodeRef.current) {
+        savePlayerRecord(leavingPlayer.sessionId, leavingPlayer.name, leavingPlayer.chips, roomCodeRef.current);
+      }
+
       const updated = prev.filter(p => p.id !== peerId);
 
       if (isHostRef.current) {
@@ -933,7 +1036,7 @@ export default function App() {
       }
       newStake = totalBet;
 
-      savePlayerChipsRegistry(actingPlayer.sessionId || actingPlayer.id, remainingChips, roomCode);
+      savePlayerRecord(actingPlayer.sessionId || actingPlayer.id, actingPlayer.name, remainingChips, roomCodeRef.current);
 
       const active = updatedPlayers.filter(p => !p.folded && !p.isSpectator);
       if (active.length === 1) {
@@ -941,11 +1044,9 @@ export default function App() {
         return;
       }
 
-      // Advance turn to the next active player (do NOT auto-show on the current bettor's turn)
       newTurn = getNextTurnIndexHost(newTurn, updatedPlayers);
       newTurnCount += 1;
 
-      // When the turn reaches a player who already has 0 chips (i.e. next round after going all-in), trigger showdown
       const nextPlayer = updatedPlayers[newTurn];
       if (nextPlayer && nextPlayer.chips === 0) {
         handleShowdownHost(updatedPlayers, newPot);
@@ -1165,7 +1266,7 @@ export default function App() {
 
       totalInitialPot += bootAmountRef.current;
       const newChips = p.chips - bootAmountRef.current;
-      savePlayerChipsRegistry(p.sessionId || p.id, newChips, roomCode);
+      savePlayerRecord(p.sessionId || p.id, p.name, newChips, roomCodeRef.current);
 
       return {
         ...p,
@@ -1177,7 +1278,6 @@ export default function App() {
       };
     });
 
-    // If everyone went all-in on the boot ante (all active players now have 0 chips), auto-show immediately
     const activeAfterBoot = dealtPlayers.filter(p => !p.folded && !p.isSpectator);
     if (activeAfterBoot.length > 0 && activeAfterBoot.every(p => p.chips === 0)) {
       setPlayers(dealtPlayers);
@@ -1201,7 +1301,6 @@ export default function App() {
       if (startTurnIdx === -1) startTurnIdx = 0;
     }
 
-    // If starting player has 0 chips, trigger showdown immediately
     if (dealtPlayers[startTurnIdx] && dealtPlayers[startTurnIdx].chips === 0) {
       setPlayers(dealtPlayers);
       setPot(totalInitialPot);
@@ -1240,7 +1339,7 @@ export default function App() {
   const executeResetFreshGameHost = () => {
     let currentPlayers = playersRef.current.map(p => {
       const freshChips = 5000;
-      savePlayerChipsRegistry(p.sessionId || p.id, freshChips, roomCode);
+      savePlayerRecord(p.sessionId || p.id, p.name, freshChips, roomCodeRef.current);
       return {
         ...p,
         chips: freshChips,
@@ -1250,6 +1349,19 @@ export default function App() {
         isSpectator: false
       };
     });
+
+    // Clear historical ledger entries for this room on explicit fresh game reset
+    const cleanRoom = (roomCodeRef.current || '').trim().toUpperCase();
+    if (cleanRoom) {
+      const freshLedger = {};
+      currentPlayers.forEach(p => {
+        if (p.sessionId) {
+          freshLedger[p.sessionId] = { name: p.name, chips: 5000, updatedAt: Date.now() };
+        }
+      });
+      writeLocalStore(getRoomLedgerKey(cleanRoom), freshLedger);
+      hostRoomLedgerRef.current = { ...freshLedger };
+    }
 
     setPlayers(currentPlayers);
     setPot(0);
@@ -1285,7 +1397,7 @@ export default function App() {
     const finalPlayers = updatedPlayers.map(p => {
       const won = p.id === winner.id;
       const newChips = won ? p.chips + finalPot : p.chips;
-      savePlayerChipsRegistry(p.sessionId || p.id, newChips, roomCode);
+      savePlayerRecord(p.sessionId || p.id, p.name, newChips, roomCodeRef.current);
       return {
         ...p,
         isBlind: false,
